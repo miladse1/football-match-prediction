@@ -1,0 +1,129 @@
+# Postgres is the system of record. Spark remains a one-shot batch image.
+# Airflow scheduler + webserver orchestrate the Python package (LocalExecutor).
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: docker/airflow.Dockerfile
+  env_file:
+    - .env
+  environment:
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: "5432"
+    PYTHONPATH: /opt/project/src
+    JAVA_HOME: /opt/java
+    SPARK_LOCAL_IP: 127.0.0.1
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/project/airflow/dags
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:?Set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?Set AIRFLOW_FERNET_KEY in .env}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:?Set AIRFLOW_WEBSERVER_SECRET_KEY in .env}
+    AIRFLOW__WEBSERVER__WORKERS: "1"
+    AIRFLOW_ADMIN_USER: ${AIRFLOW_ADMIN_USER:?Set AIRFLOW_ADMIN_USER in .env}
+    AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:?Set AIRFLOW_ADMIN_PASSWORD in .env}
+  volumes:
+    - .:/opt/project
+  user: "50000:0"
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fmp-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-football}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-football}
+      POSTGRES_DB: ${POSTGRES_DB:-football_match_prediction}
+    ports:
+      # Host loopback only — do not publish 0.0.0.0:5432.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  spark:
+    build:
+      context: .
+      dockerfile: docker/spark.Dockerfile
+    working_dir: /opt/project
+    volumes:
+      - .:/opt/project
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      RUN_SPARK_TESTS: "1"
+    command: ["python", "-m", "football_pipeline.build_features"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: ["/bin/bash", "/opt/project/docker/airflow-init.sh"]
+    restart: "no"
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      # Host loopback only — do not publish 0.0.0.0:8080.
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: docker/dashboard.Dockerfile
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      PYTHONPATH: /opt/project/src
+      DASHBOARD_HOST: 0.0.0.0
+      DASHBOARD_PORT: "8500"
+    volumes:
+      - .:/opt/project
+    ports:
+      - "127.0.0.1:8500:8500"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:

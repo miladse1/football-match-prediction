@@ -1,0 +1,459 @@
+"""Postgres reads for the dashboard. Does not fit or score models."""
+
+from __future__ import annotations
+
+import json
+from datetime import date, time
+
+import numpy as np
+
+from football_dashboard.formatters import (
+    actual_outcome,
+    algorithm_label,
+    as_percent,
+    group_by_date,
+    match_note,
+    paginate,
+    predicted_outcome,
+)
+from football_pipeline.config import ROOT
+from football_pipeline.db import connect
+
+REPORT_PATH = ROOT / "data" / "processed" / "model_metrics.json"
+LIVE_START_YEAR = 2026
+LIVE_SEASON = f"{LIVE_START_YEAR}/{str(LIVE_START_YEAR + 1)[2:]}"
+
+
+def _selected_algorithm() -> str:
+    if REPORT_PATH.is_file():
+        report = json.loads(REPORT_PATH.read_text(encoding="utf-8"))
+        name = report.get("selected_by_walkforward_log_loss") or report.get(
+            "selected_by_valid_log_loss"
+        )
+        if name:
+            return str(name)
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT algorithm
+                FROM model_runs
+                WHERE artifact_path IS NOT NULL
+                ORDER BY trained_at DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+    if not row:
+        raise RuntimeError("No trained model in model_runs.")
+    return row[0]
+
+
+def _iso_date(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
+
+
+def _iso_time(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, time):
+        return value.strftime("%H:%M")
+    text = str(value)
+    return text[:5] if len(text) >= 5 else text
+
+
+def _iso_stamp(value) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat()
+
+
+def _serialize_fixture(row: dict, *, include_result: bool) -> dict:
+    home = row["home_team"]
+    away = row["away_team"]
+    predicted = int(row["predicted_class"])
+    payload = {
+        "match_id": int(row["match_id"]),
+        "kickoff_date": _iso_date(row["match_date"]),
+        "kickoff_time": _iso_time(row["kickoff_time"]),
+        "home_team": home,
+        "away_team": away,
+        "p_home": float(row["p_home"]),
+        "p_draw": float(row["p_draw"]),
+        "p_away": float(row["p_away"]),
+        "p_home_pct": as_percent(row["p_home"]),
+        "p_draw_pct": as_percent(row["p_draw"]),
+        "p_away_pct": as_percent(row["p_away"]),
+        "predicted_class": predicted,
+        "predicted_outcome": predicted_outcome(predicted, home, away),
+        "model_name": algorithm_label(row["algorithm"]),
+        "model_algorithm": row["algorithm"],
+        "feature_version": row["feature_version"],
+        "predicted_at": _iso_stamp(row["predicted_at"]),
+        "note": match_note(row["p_home"], row["p_draw"], row["p_away"], predicted),
+    }
+    if include_result:
+        code = None if row["result_code"] is None else int(row["result_code"])
+        payload["home_goals"] = row["home_goals"]
+        payload["away_goals"] = row["away_goals"]
+        payload["result_code"] = code
+        payload["actual_outcome"] = actual_outcome(code, home, away)
+        payload["correct"] = code is not None and code == predicted
+    return payload
+
+
+def production_model() -> dict:
+    algorithm = _selected_algorithm()
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, algorithm, feature_version, trained_at, artifact_path
+                FROM model_runs
+                WHERE algorithm = %s AND artifact_path IS NOT NULL
+                ORDER BY trained_at DESC
+                LIMIT 1
+                """,
+                (algorithm,),
+            )
+            row = cur.fetchone()
+    if not row:
+        raise RuntimeError(f"No artifact for {algorithm}")
+    return {
+        "model_run_id": int(row[0]),
+        "algorithm": row[1],
+        "model_name": algorithm_label(row[1]),
+        "feature_version": row[2],
+        "trained_at": _iso_stamp(row[3]),
+        "artifact_path": row[4],
+    }
+
+
+def list_teams() -> list[str]:
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT canonical_name
+                FROM teams
+                ORDER BY canonical_name
+                """
+            )
+            return [row[0] for row in cur.fetchall()]
+
+
+def latest_completed_match() -> dict | None:
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.match_date, m.kickoff_time, m.home_goals, m.away_goals,
+                       home.canonical_name, away.canonical_name, m.result
+                FROM matches AS m
+                JOIN teams AS home ON home.id = m.home_team_id
+                JOIN teams AS away ON away.id = m.away_team_id
+                WHERE m.is_played
+                ORDER BY m.match_date DESC, m.kickoff_time DESC NULLS LAST, m.id DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "kickoff_date": _iso_date(row[0]),
+        "kickoff_time": _iso_time(row[1]),
+        "home_goals": row[2],
+        "away_goals": row[3],
+        "home_team": row[4],
+        "away_team": row[5],
+        "result": row[6],
+        "scoreline": f"{row[4]} {row[2]}–{row[3]} {row[5]}",
+    }
+
+
+def predictions_updated_at() -> str | None:
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MAX(created_at) FROM predictions")
+            row = cur.fetchone()
+    return _iso_stamp(row[0]) if row and row[0] else None
+
+
+def upcoming_fixtures(*, team: str | None = None, date_from: str | None = None, date_to: str | None = None) -> list[dict]:
+    model = production_model()
+    clauses = ["m.is_played = FALSE", "p.model_run_id = %s"]
+    params: list = [model["model_run_id"]]
+    if team:
+        clauses.append("(home.canonical_name = %s OR away.canonical_name = %s)")
+        params.extend([team, team])
+    if date_from:
+        clauses.append("m.match_date >= %s")
+        params.append(date_from)
+    if date_to:
+        clauses.append("m.match_date <= %s")
+        params.append(date_to)
+    where = " AND ".join(clauses)
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT m.id AS match_id, m.match_date, m.kickoff_time,
+                       home.canonical_name AS home_team,
+                       away.canonical_name AS away_team,
+                       p.p_away, p.p_draw, p.p_home, p.predicted_class, p.created_at AS predicted_at,
+                       r.algorithm, r.feature_version
+                FROM matches AS m
+                JOIN predictions AS p ON p.match_id = m.id
+                JOIN model_runs AS r ON r.id = p.model_run_id
+                JOIN teams AS home ON home.id = m.home_team_id
+                JOIN teams AS away ON away.id = m.away_team_id
+                WHERE {where}
+                ORDER BY m.match_date, m.kickoff_time NULLS LAST, m.id
+                """,
+                params,
+            )
+            columns = [col.name for col in cur.description]
+            rows = [dict(zip(columns, rec)) for rec in cur.fetchall()]
+    return [_serialize_fixture(row, include_result=False) for row in rows]
+
+
+def settled_live_fixtures(
+    *,
+    team: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> list[dict]:
+    """Played live-season matches that still have a frozen pre-match prediction."""
+    algorithm = _selected_algorithm()
+    clauses = ["m.is_played", "s.start_year = %s", "r.algorithm = %s"]
+    params: list = [LIVE_START_YEAR, algorithm]
+    if team:
+        clauses.append("(home.canonical_name = %s OR away.canonical_name = %s)")
+        params.extend([team, team])
+    if date_from:
+        clauses.append("m.match_date >= %s")
+        params.append(date_from)
+    if date_to:
+        clauses.append("m.match_date <= %s")
+        params.append(date_to)
+    where = " AND ".join(clauses)
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT DISTINCT ON (m.id)
+                       m.id AS match_id, m.match_date, m.kickoff_time,
+                       home.canonical_name AS home_team,
+                       away.canonical_name AS away_team,
+                       m.home_goals, m.away_goals, m.result_code,
+                       p.p_away, p.p_draw, p.p_home, p.predicted_class, p.created_at AS predicted_at,
+                       r.algorithm, r.feature_version
+                FROM matches AS m
+                JOIN seasons AS s ON s.id = m.season_id
+                JOIN predictions AS p ON p.match_id = m.id
+                JOIN model_runs AS r ON r.id = p.model_run_id
+                JOIN teams AS home ON home.id = m.home_team_id
+                JOIN teams AS away ON away.id = m.away_team_id
+                WHERE {where}
+                ORDER BY m.id, p.created_at DESC
+                """,
+                params,
+            )
+            columns = [col.name for col in cur.description]
+            rows = [dict(zip(columns, rec)) for rec in cur.fetchall()]
+    rows.sort(key=lambda item: (item["match_date"], item["kickoff_time"] or time(0, 0)), reverse=True)
+    return [_serialize_fixture(row, include_result=True) for row in rows]
+
+
+def live_scorecard(settled: list[dict]) -> dict:
+    if not settled:
+        return {"n": 0, "accuracy": None, "log_loss": None, "correct": 0, "by_actual": {}, "by_predicted": {}}
+    y = np.array([row["result_code"] for row in settled], dtype=int)
+    proba = np.array([[row["p_away"], row["p_draw"], row["p_home"]] for row in settled], dtype=float)
+    pred = np.array([row["predicted_class"] for row in settled], dtype=int)
+    clipped = np.clip(proba, 1e-15, 1.0)
+    clipped = clipped / clipped.sum(axis=1, keepdims=True)
+    log_loss = float(-np.mean(np.log(clipped[np.arange(len(y)), y])))
+    correct = int((pred == y).sum())
+    return {
+        "n": int(len(settled)),
+        "correct": correct,
+        "accuracy": correct / len(settled),
+        "log_loss": log_loss,
+        "by_actual": _class_slice(settled, "result_code"),
+        "by_predicted": _class_slice(settled, "predicted_class"),
+    }
+
+
+def _class_slice(settled: list[dict], key: str) -> dict:
+    labels = {0: "away", 1: "draw", 2: "home"}
+    out: dict[str, dict] = {}
+    for code, name in labels.items():
+        rows = [row for row in settled if int(row[key]) == code]
+        n = len(rows)
+        hits = sum(1 for row in rows if int(row["predicted_class"]) == int(row["result_code"]))
+        out[name] = {
+            "n": n,
+            "correct": hits,
+            "rate": (hits / n) if n else None,
+        }
+    return out
+
+
+def overview_payload() -> dict:
+    model = production_model()
+    upcoming = upcoming_fixtures()
+    settled = settled_live_fixtures()
+    return {
+        "model": model,
+        "live_season": LIVE_SEASON,
+        "predictions_updated_at": predictions_updated_at(),
+        "latest_completed_match": latest_completed_match(),
+        "live_scorecard": live_scorecard(settled),
+        "n_upcoming": len(upcoming),
+        "n_settled": len(settled),
+        "next_upcoming": upcoming[:8],
+        "teams": list_teams(),
+    }
+
+
+def upcoming_payload(
+    *,
+    team: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    page: int = 1,
+    page_size: int = 16,
+) -> dict:
+    model = production_model()
+    rows = upcoming_fixtures(team=team, date_from=date_from, date_to=date_to)
+    page_data = paginate(rows, page=page, page_size=page_size)
+    return {
+        "model": model,
+        "live_season": LIVE_SEASON,
+        "teams": list_teams(),
+        "page": page_data["page"],
+        "page_size": page_data["page_size"],
+        "total": page_data["total"],
+        "pages": page_data["pages"],
+        "groups": group_by_date(page_data["items"]),
+    }
+
+
+def results_payload(
+    *,
+    team: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    page: int = 1,
+    page_size: int = 16,
+) -> dict:
+    model = production_model()
+    rows = settled_live_fixtures(team=team, date_from=date_from, date_to=date_to)
+    page_data = paginate(rows, page=page, page_size=page_size)
+    return {
+        "model": model,
+        "live_season": LIVE_SEASON,
+        "teams": list_teams(),
+        "page": page_data["page"],
+        "page_size": page_data["page_size"],
+        "total": page_data["total"],
+        "pages": page_data["pages"],
+        "groups": group_by_date(page_data["items"]),
+    }
+
+
+def performance_payload() -> dict:
+    settled = settled_live_fixtures()
+    score = live_scorecard(settled)
+    return {
+        "model": production_model(),
+        "live_season": LIVE_SEASON,
+        "live_scorecard": score,
+        "n_settled": score["n"],
+    }
+
+
+def about_payload() -> dict:
+    report = {}
+    if REPORT_PATH.is_file():
+        report = json.loads(REPORT_PATH.read_text(encoding="utf-8"))
+    test_path = ROOT / "data" / "processed" / "final_test_metrics.json"
+    test_report = json.loads(test_path.read_text(encoding="utf-8")) if test_path.is_file() else {}
+    test = test_report.get("test") or report.get("test_holdout") or {}
+    walk = (report.get("walkforward") or {}).get("summary") or {}
+    selected = report.get("selected_by_walkforward_log_loss") or "logistic_regression"
+    selected_stats = (walk.get(selected) or {}).get("mean") or {}
+    model = production_model()
+    return {
+        "model": model,
+        "selection_reason": report.get("selection_reason"),
+        "walkforward_folds": (report.get("walkforward") or {}).get("folds") or [],
+        "walkforward_mean_log_loss": selected_stats.get("log_loss"),
+        "walkforward_mean_accuracy": selected_stats.get("accuracy"),
+        "feature_version": report.get("feature_version") or model["feature_version"],
+        "features": [
+            {
+                "title": "Recent form",
+                "detail": "Last-five win rate, points, goal difference, and goals scored/conceded for each side.",
+            },
+            {
+                "title": "Home and away splits",
+                "detail": "Home-team home form and away-team away form over the previous five matching fixtures.",
+            },
+            {
+                "title": "Head-to-head",
+                "detail": "Prior meetings between the same two clubs, including historical draw rate.",
+            },
+            {
+                "title": "Elo ratings",
+                "detail": "Pre-match Elo for each club plus the absolute rating gap.",
+            },
+            {
+                "title": "Draw-aware rates",
+                "detail": "Last-five draw rates (overall and venue-specific) and closeness proxies such as PPG and goal differentials.",
+            },
+        ],
+        "leakage_note": (
+            "Every feature is computed from matches that finished before the fixture. "
+            "The current match never enters its own form, Elo, or head-to-head window."
+        ),
+        "history": {
+            "ingest": "Premier League results from 2018/19 through the current season",
+            "walkforward": "Expanding-window selection on 2021/22–2024/25, training through the previous season each time",
+            "production_train": "Retrain the winner on permitted history through 2024/25",
+            "test": "Untouched 2025/26 holdout, evaluated once after selection",
+            "live": "2026/27 is scored live only and is never used for selection or test metrics",
+        },
+        "test_season": test_report.get("test_season") or "2025/26",
+        "test": {
+            "n": test.get("n"),
+            "accuracy": test.get("accuracy"),
+            "log_loss": test.get("log_loss"),
+            "f1_macro": test.get("f1_macro"),
+            "precision_home": test.get("precision_home"),
+            "recall_home": test.get("recall_home"),
+            "f1_home": test.get("f1_home"),
+            "precision_draw": test.get("precision_draw"),
+            "recall_draw": test.get("recall_draw"),
+            "f1_draw": test.get("f1_draw"),
+            "precision_away": test.get("precision_away"),
+            "recall_away": test.get("recall_away"),
+            "f1_away": test.get("f1_away"),
+            "confusion_matrix": test.get("confusion_matrix"),
+            "draw_proba_mean": ((test.get("metrics") or {}).get("draw_proba") or {}).get("mean"),
+            "pct_argmax_draw": ((test.get("metrics") or {}).get("draw_proba") or {}).get("pct_argmax_draw"),
+        },
+        "draw_limitation": (
+            "The selected unweighted logistic regression assigns meaningful draw probability "
+            "(around 22% on 2025/26) but almost never has Draw as the single most likely class. "
+            "Argmax therefore rarely, if ever, predicts a draw. That is a known limitation of the "
+            "production model, not a UI rounding choice. Predicted labels on this dashboard are "
+            "exactly the stored argmax."
+        ),
+    }

@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MatchLab · Premier League</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <a class="brand" href="/" data-link>
+          <span class="brand-mark">ML</span>
+          <span>
+            <span class="brand-name">MatchLab</span>
+            <span class="brand-sub" id="season-label">Premier League</span>
+          </span>
+        </a>
+        <nav class="nav" aria-label="Primary">
+          <a href="/" data-link data-nav="/">Overview</a>
+          <a href="/upcoming" data-link data-nav="/upcoming">Upcoming</a>
+          <a href="/results" data-link data-nav="/results">Results</a>
+          <a href="/performance" data-link data-nav="/performance">Performance</a>
+          <a href="/about" data-link data-nav="/about">About model</a>
+        </nav>
+      </header>
+      <main id="view" class="view"><p class="empty">Loading…</p></main>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from football_dashboard.queries import (
     about_payload,
     forecast_payload,
+    match_detail_payload,
     overview_payload,
     performance_payload,
     results_payload,
@@ -94,6 +95,24 @@ def forecast() -> dict:
         return forecast_payload()
     except ForecastUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/api/matches/{match_id}")
+def match_detail(match_id: int) -> dict:
+    payload = match_detail_payload(match_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Match not found.")
+    return payload
+
+
+@app.get("/upcoming/{match_id}")
+def upcoming_match(match_id: int) -> FileResponse:
+    return _page()
+
+
+@app.get("/results/{match_id}")
+def result_match(match_id: int) -> FileResponse:
+    return _page()
 
 
 @app.get("/{page}")

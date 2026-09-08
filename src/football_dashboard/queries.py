@@ -7,14 +7,20 @@ from datetime import date, time
 
 import numpy as np
 
+from football_dashboard.crests import team_badge
 from football_dashboard.formatters import (
     actual_outcome,
     algorithm_label,
     as_percent,
+    competition_label,
+    extract_match_stats,
+    filter_prior_h2h,
     group_by_date,
     match_note,
+    ordinal,
     paginate,
     predicted_outcome,
+    result_side_label,
 )
 from football_pipeline.config import ROOT
 from football_pipeline.db import connect
@@ -72,37 +78,54 @@ def _iso_stamp(value) -> str | None:
     return value.isoformat()
 
 
+def _has_prediction(row: dict) -> bool:
+    return row.get("predicted_class") is not None and row.get("p_home") is not None
+
+
 def _serialize_fixture(row: dict, *, include_result: bool) -> dict:
     home = row["home_team"]
     away = row["away_team"]
-    predicted = int(row["predicted_class"])
     payload = {
         "match_id": int(row["match_id"]),
         "kickoff_date": _iso_date(row["match_date"]),
         "kickoff_time": _iso_time(row["kickoff_time"]),
         "home_team": home,
         "away_team": away,
-        "p_home": float(row["p_home"]),
-        "p_draw": float(row["p_draw"]),
-        "p_away": float(row["p_away"]),
-        "p_home_pct": as_percent(row["p_home"]),
-        "p_draw_pct": as_percent(row["p_draw"]),
-        "p_away_pct": as_percent(row["p_away"]),
-        "predicted_class": predicted,
-        "predicted_outcome": predicted_outcome(predicted, home, away),
-        "model_name": algorithm_label(row["algorithm"]),
-        "model_algorithm": row["algorithm"],
-        "feature_version": row["feature_version"],
-        "predicted_at": _iso_stamp(row["predicted_at"]),
-        "note": match_note(row["p_home"], row["p_draw"], row["p_away"], predicted),
+        "home_crest": team_badge(home),
+        "away_crest": team_badge(away),
+        "has_prediction": False,
     }
+    if _has_prediction(row):
+        predicted = int(row["predicted_class"])
+        payload.update(
+            {
+                "has_prediction": True,
+                "p_home": float(row["p_home"]),
+                "p_draw": float(row["p_draw"]),
+                "p_away": float(row["p_away"]),
+                "p_home_pct": as_percent(row["p_home"]),
+                "p_draw_pct": as_percent(row["p_draw"]),
+                "p_away_pct": as_percent(row["p_away"]),
+                "predicted_class": predicted,
+                "predicted_outcome": predicted_outcome(predicted, home, away),
+                "model_name": algorithm_label(row["algorithm"]),
+                "model_algorithm": row["algorithm"],
+                "feature_version": row["feature_version"],
+                "predicted_at": _iso_stamp(row["predicted_at"]),
+                "note": match_note(row["p_home"], row["p_draw"], row["p_away"], predicted),
+            }
+        )
     if include_result:
         code = None if row["result_code"] is None else int(row["result_code"])
         payload["home_goals"] = row["home_goals"]
         payload["away_goals"] = row["away_goals"]
         payload["result_code"] = code
         payload["actual_outcome"] = actual_outcome(code, home, away)
-        payload["correct"] = code is not None and code == predicted
+        payload["correct"] = (
+            None
+            if not payload.get("has_prediction") or code is None
+            else code == int(row["predicted_class"])
+        )
     return payload
 
 
@@ -390,6 +413,239 @@ def performance_payload() -> dict:
         "live_scorecard": score,
         "n_settled": score["n"],
     }
+
+
+def live_table_positions() -> dict[str, dict]:
+    """Current live-season table from played matches. Display only; not used in training."""
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT home.canonical_name AS home_team,
+                       away.canonical_name AS away_team,
+                       m.home_goals, m.away_goals
+                FROM matches AS m
+                JOIN seasons AS s ON s.id = m.season_id
+                JOIN teams AS home ON home.id = m.home_team_id
+                JOIN teams AS away ON away.id = m.away_team_id
+                WHERE m.is_played AND s.start_year = %s
+                """,
+                (LIVE_START_YEAR,),
+            )
+            played = cur.fetchall()
+            cur.execute(
+                """
+                SELECT DISTINCT t.canonical_name
+                FROM teams AS t
+                JOIN matches AS m ON m.home_team_id = t.id OR m.away_team_id = t.id
+                JOIN seasons AS s ON s.id = m.season_id
+                WHERE s.start_year = %s
+                """,
+                (LIVE_START_YEAR,),
+            )
+            teams = [row[0] for row in cur.fetchall()]
+    table = {
+        name: {"played": 0, "points": 0, "gf": 0, "ga": 0, "gd": 0} for name in teams
+    }
+    for home, away, home_goals, away_goals in played:
+        home_goals = int(home_goals)
+        away_goals = int(away_goals)
+        if home_goals > away_goals:
+            home_pts, away_pts = 3, 0
+        elif home_goals < away_goals:
+            home_pts, away_pts = 0, 3
+        else:
+            home_pts, away_pts = 1, 1
+        table[home]["played"] += 1
+        table[away]["played"] += 1
+        table[home]["points"] += home_pts
+        table[away]["points"] += away_pts
+        table[home]["gf"] += home_goals
+        table[home]["ga"] += away_goals
+        table[away]["gf"] += away_goals
+        table[away]["ga"] += home_goals
+        table[home]["gd"] = table[home]["gf"] - table[home]["ga"]
+        table[away]["gd"] = table[away]["gf"] - table[away]["ga"]
+    ranked = sorted(
+        table.items(),
+        key=lambda item: (-item[1]["points"], -item[1]["gd"], -item[1]["gf"], item[0]),
+    )
+    positions: dict[str, dict] = {}
+    for index, (name, stats) in enumerate(ranked, start=1):
+        positions[name] = {
+            **stats,
+            "position": index,
+            "position_label": ordinal(index),
+        }
+    return positions
+
+
+def _serialize_h2h(row: dict) -> dict:
+    home = row["home_team"]
+    away = row["away_team"]
+    code = None if row["result_code"] is None else int(row["result_code"])
+    match_id = int(row["match_id"])
+    return {
+        "match_id": match_id,
+        "kickoff_date": _iso_date(row["match_date"]),
+        "kickoff_time": _iso_time(row["kickoff_time"]),
+        "home_team": home,
+        "away_team": away,
+        "home_crest": team_badge(home),
+        "away_crest": team_badge(away),
+        "home_goals": row["home_goals"],
+        "away_goals": row["away_goals"],
+        "result_code": code,
+        "result_label": result_side_label(code),
+        "detail_path": f"/results/{match_id}",
+    }
+
+
+def prior_head_to_head(
+    *,
+    home_team_id: int,
+    away_team_id: int,
+    home_team: str,
+    away_team: str,
+    fixture_date: str,
+    fixture_match_id: int,
+    limit: int = 5,
+) -> list[dict]:
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.id AS match_id, m.match_date, m.kickoff_time, m.is_played,
+                       home.canonical_name AS home_team,
+                       away.canonical_name AS away_team,
+                       m.home_goals, m.away_goals, m.result_code
+                FROM matches AS m
+                JOIN teams AS home ON home.id = m.home_team_id
+                JOIN teams AS away ON away.id = m.away_team_id
+                WHERE m.is_played
+                  AND m.id <> %s
+                  AND m.match_date < %s
+                  AND (
+                        (m.home_team_id = %s AND m.away_team_id = %s)
+                     OR (m.home_team_id = %s AND m.away_team_id = %s)
+                  )
+                ORDER BY m.match_date DESC, m.kickoff_time DESC NULLS LAST, m.id DESC
+                LIMIT %s
+                """,
+                (
+                    fixture_match_id,
+                    fixture_date,
+                    home_team_id,
+                    away_team_id,
+                    away_team_id,
+                    home_team_id,
+                    limit,
+                ),
+            )
+            columns = [col.name for col in cur.description]
+            rows = [dict(zip(columns, rec)) for rec in cur.fetchall()]
+    filtered = filter_prior_h2h(
+        rows,
+        fixture_date=fixture_date,
+        fixture_match_id=fixture_match_id,
+        home_team=home_team,
+        away_team=away_team,
+        limit=limit,
+    )
+    return [_serialize_h2h(row) for row in filtered]
+
+
+def _apply_table_ranks(fixture: dict) -> None:
+    positions = live_table_positions()
+    home_table = positions.get(fixture["home_team"])
+    away_table = positions.get(fixture["away_team"])
+    fixture["home_position"] = None if home_table is None else home_table["position"]
+    fixture["home_position_label"] = None if home_table is None else home_table["position_label"]
+    fixture["away_position"] = None if away_table is None else away_table["position"]
+    fixture["away_position_label"] = None if away_table is None else away_table["position_label"]
+
+
+def match_detail_payload(match_id: int) -> dict | None:
+    """Upcoming or completed match detail. Reads stored rows only; does not score or retrain."""
+    model = production_model()
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.id AS match_id, m.match_date, m.kickoff_time, m.is_played,
+                       m.home_team_id, m.away_team_id,
+                       m.home_goals, m.away_goals, m.result_code,
+                       home.canonical_name AS home_team,
+                       away.canonical_name AS away_team,
+                       c.name AS competition_name,
+                       pred.p_away, pred.p_draw, pred.p_home, pred.predicted_class, pred.predicted_at,
+                       pred.algorithm, pred.feature_version,
+                       raw.payload
+                FROM matches AS m
+                JOIN teams AS home ON home.id = m.home_team_id
+                JOIN teams AS away ON away.id = m.away_team_id
+                JOIN competitions AS c ON c.id = m.competition_id
+                LEFT JOIN LATERAL (
+                    SELECT p.p_away, p.p_draw, p.p_home, p.predicted_class,
+                           p.created_at AS predicted_at, r.algorithm, r.feature_version
+                    FROM predictions AS p
+                    JOIN model_runs AS r ON r.id = p.model_run_id
+                    WHERE p.match_id = m.id AND r.algorithm = %s
+                    ORDER BY p.created_at DESC
+                    LIMIT 1
+                ) AS pred ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT rp.payload
+                    FROM raw_match_payloads AS rp
+                    WHERE rp.season_id = m.season_id
+                      AND rp.payload->>'HomeTeam' = home.source_name
+                      AND rp.payload->>'AwayTeam' = away.source_name
+                      AND rp.payload->>'FTHG' IS NOT NULL
+                      AND rp.payload->>'FTHG' <> ''
+                    ORDER BY CASE WHEN rp.source_file = m.source_file THEN 0 ELSE 1 END, rp.id
+                    LIMIT 1
+                ) AS raw ON TRUE
+                WHERE m.id = %s
+                """,
+                (model["algorithm"], match_id),
+            )
+            columns = [col.name for col in cur.description]
+            rec = cur.fetchone()
+    if not rec:
+        return None
+    row = dict(zip(columns, rec))
+    played = bool(row["is_played"])
+    if not played and not _has_prediction(row):
+        return None
+    fixture = _serialize_fixture(row, include_result=played)
+    fixture["competition"] = competition_label(row.get("competition_name"))
+    fixture["status"] = "Full-time" if played else "Upcoming"
+    _apply_table_ranks(fixture)
+    stats = extract_match_stats(row.get("payload")) if played else []
+    payload = {
+        "kind": "result" if played else "upcoming",
+        "model": model,
+        "live_season": LIVE_SEASON,
+        "match": fixture,
+        "timeline_available": False,
+        "timeline_note": "Goal timeline not available from the current data source.",
+    }
+    if played:
+        payload["stats"] = stats
+        payload["stats_available"] = bool(stats)
+        return payload
+    meetings = prior_head_to_head(
+        home_team_id=int(row["home_team_id"]),
+        away_team_id=int(row["away_team_id"]),
+        home_team=fixture["home_team"],
+        away_team=fixture["away_team"],
+        fixture_date=fixture["kickoff_date"],
+        fixture_match_id=int(row["match_id"]),
+    )
+    payload["head_to_head"] = meetings
+    payload["h2h_limit"] = 5
+    payload["h2h_count"] = len(meetings)
+    return payload
 
 
 def about_payload() -> dict:

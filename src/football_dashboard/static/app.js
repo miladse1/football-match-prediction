@@ -78,7 +78,50 @@ function html(strings, ...values) {
 function setNav() {
   const current = pathOf();
   document.querySelectorAll("[data-nav]").forEach((link) => {
-    link.classList.toggle("active", link.dataset.nav === current);
+    const target = link.dataset.nav;
+    const active =
+      current === target ||
+      (target === "/upcoming" && current.startsWith("/upcoming/")) ||
+      (target === "/results" && current.startsWith("/results/"));
+    link.classList.toggle("active", active);
+  });
+}
+
+function matchDetailRoute() {
+  const upcoming = pathOf().match(/^\/upcoming\/(\d+)$/);
+  if (upcoming) return { kind: "upcoming", id: Number(upcoming[1]) };
+  const result = pathOf().match(/^\/results\/(\d+)$/);
+  if (result) return { kind: "result", id: Number(result[1]) };
+  return null;
+}
+
+function crestHtml(team, crest, extraClass = "") {
+  const badge = crest || {};
+  const initials = escapeHtml(badge.initials || team.slice(0, 3).toUpperCase());
+  const color = escapeHtml(badge.color || "#3d4338");
+  const ink = escapeHtml(badge.ink || "#f4f1e8");
+  const fallback = `<span class="crest-fallback" style="background:${color};color:${ink}">${initials}</span>`;
+  if (!badge.crest_url) {
+    return `<span class="crest-wrap ${extraClass}">${fallback}</span>`;
+  }
+  return html`
+    <span class="crest-wrap ${extraClass}">
+      ${fallback}
+      <img class="crest" src="${escapeHtml(badge.crest_url)}" alt="" data-initials="${initials}" />
+    </span>
+  `;
+}
+
+function bindCrestFallbacks(root = document) {
+  root.querySelectorAll("img.crest").forEach((img) => {
+    const hideFallback = () => {
+      const fallback = img.parentElement?.querySelector(".crest-fallback");
+      if (fallback) fallback.hidden = true;
+    };
+    img.addEventListener("error", () => img.remove(), { once: true });
+    img.addEventListener("load", hideFallback);
+    if (img.complete && img.naturalWidth) hideFallback();
+    else if (img.complete) img.remove();
   });
 }
 
@@ -102,12 +145,25 @@ function fixtureCard(item, { settled = false, compact = false } = {}) {
     ? `<span class="pill ${item.correct ? "ok" : "wrong"}">${item.correct ? "Correct" : "Missed"}</span>
        <span class="scoreline">${item.home_goals}–${item.away_goals} · ${escapeHtml(item.actual_outcome)}</span>`
     : `<span class="pill">${escapeHtml(item.model_name)} · ${escapeHtml(item.feature_version)}</span>`;
+  const href = item.match_id
+    ? `${settled ? "/results" : "/upcoming"}/${item.match_id}`
+    : "";
+  const link = href
+    ? `<a class="fixture-card-link" data-link href="${href}" aria-label="${escapeHtml(item.home_team)} vs ${escapeHtml(item.away_team)} match detail"></a>`
+    : "";
   return html`
-    <article class="fixture-card ${compact ? "compact-list" : ""}">
+    <article class="fixture-card ${compact ? "compact-list" : ""} ${href ? "is-link" : ""}">
+      ${link}
       <div class="card-top">
         <div>
           <p class="kickoff">${formatKickoff(item.kickoff_date, item.kickoff_time)}</p>
-          <h3 class="fixture-title">${escapeHtml(item.home_team)} vs ${escapeHtml(item.away_team)}</h3>
+          <h3 class="fixture-title">
+            ${crestHtml(item.home_team, item.home_crest, "crest-sm")}
+            <span>${escapeHtml(item.home_team)}</span>
+            <span class="vs-inline">vs</span>
+            ${crestHtml(item.away_team, item.away_crest, "crest-sm")}
+            <span>${escapeHtml(item.away_team)}</span>
+          </h3>
         </div>
         ${note}
       </div>
@@ -284,6 +340,7 @@ async function renderOverview() {
       </div>
     </div>
   `;
+  bindCrestFallbacks(view);
 }
 
 async function renderUpcoming() {
@@ -313,6 +370,7 @@ async function renderUpcoming() {
   `;
   fillTeams(data.teams, query.team);
   bindFilters("/upcoming");
+  bindCrestFallbacks(view);
 }
 
 async function renderResults() {
@@ -342,6 +400,7 @@ async function renderResults() {
   `;
   fillTeams(data.teams, query.team);
   bindFilters("/results");
+  bindCrestFallbacks(view);
 }
 
 function chartRows(slice, emptyLabel) {
@@ -556,6 +615,228 @@ async function renderForecast() {
   `;
 }
 
+function teamSide(name, crest, positionLabel, align) {
+  const rank = positionLabel ? `<span class="rank-pill">${escapeHtml(positionLabel)}</span>` : "";
+  return html`
+    <div class="match-side ${align}">
+      ${crestHtml(name, crest, "crest-lg")}
+      <p class="match-team">${escapeHtml(name)}</p>
+      ${rank}
+    </div>
+  `;
+}
+
+function winProbability(match, { secondary = false } = {}) {
+  if (!match.has_prediction) {
+    return `<section class="win-prob ${secondary ? "is-secondary" : ""}"><p class="help">No stored pre-match prediction for this fixture.</p></section>`;
+  }
+  const predicted = match.predicted_outcome;
+  const homeOn = predicted === match.home_team ? "is-predicted" : "";
+  const drawOn = predicted === "Draw" ? "is-predicted" : "";
+  const awayOn = predicted === match.away_team ? "is-predicted" : "";
+  const verdict = match.correct == null
+    ? ""
+    : `<span class="pill ${match.correct ? "ok" : "wrong"}">${match.correct ? "Correct" : "Missed"}</span>`;
+  const actual = match.actual_outcome
+    ? `<p class="help">Actual outcome: ${escapeHtml(match.actual_outcome)}</p>`
+    : "";
+  return html`
+    <section class="win-prob ${secondary ? "is-secondary" : ""}">
+      <h2>${secondary ? "Pre-match prediction" : "Win probability"}</h2>
+      <div class="win-labels">
+        <div class="${homeOn}">
+          <span>${escapeHtml(match.home_team)}</span>
+          <strong>${match.p_home_pct}%</strong>
+        </div>
+        <div class="${drawOn}">
+          <span>Draw</span>
+          <strong>${match.p_draw_pct}%</strong>
+        </div>
+        <div class="${awayOn}">
+          <span>${escapeHtml(match.away_team)}</span>
+          <strong>${match.p_away_pct}%</strong>
+        </div>
+      </div>
+      <div class="win-bar" role="img" aria-label="Home ${match.p_home_pct} percent, draw ${match.p_draw_pct} percent, away ${match.p_away_pct} percent">
+        <span class="seg home" style="width:${match.p_home_pct}%"></span>
+        <span class="seg draw" style="width:${match.p_draw_pct}%"></span>
+        <span class="seg away" style="width:${match.p_away_pct}%"></span>
+      </div>
+      <div class="win-outcome">
+        <div>
+          <p class="predicted">Predicted outcome: ${escapeHtml(predicted)}</p>
+          ${actual}
+        </div>
+        <div class="outcome">
+          ${verdict}
+          <span class="pill">${escapeHtml(match.model_name)}${match.feature_version ? ` · ${escapeHtml(match.feature_version)}` : ""}</span>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function teamStatsBlock(match, stats, available) {
+  if (!available || !stats.length) {
+    return `<p class="stats-fallback">Detailed match stats not available</p>`;
+  }
+  const rows = stats
+    .map((stat) => {
+      const homeCls = stat.leader === "home" ? "is-leader" : "";
+      const awayCls = stat.leader === "away" ? "is-leader" : "";
+      return html`
+        <div class="stat-line">
+          <span class="stat-val ${homeCls}">${stat.home}</span>
+          <span class="stat-name">${escapeHtml(stat.label)}</span>
+          <span class="stat-val ${awayCls}">${stat.away}</span>
+        </div>
+      `;
+    })
+    .join("");
+  return html`
+    <div class="team-stats">
+      <div class="stat-line stat-head">
+        ${crestHtml(match.home_team, match.home_crest, "crest-xs")}
+        <span class="stat-name">Team stats</span>
+        ${crestHtml(match.away_team, match.away_crest, "crest-xs")}
+      </div>
+      ${rows}
+    </div>
+  `;
+}
+
+function h2hCard(meeting) {
+  const href = meeting.detail_path || `/results/${meeting.match_id}`;
+  return html`
+    <a class="h2h-card is-link" data-link href="${href}" aria-label="${escapeHtml(meeting.home_team)} ${meeting.home_goals}–${meeting.away_goals} ${escapeHtml(meeting.away_team)}">
+      <p class="h2h-date">${formatKickoff(meeting.kickoff_date, meeting.kickoff_time)}</p>
+      <div class="h2h-board">
+        <div class="h2h-club">
+          ${crestHtml(meeting.home_team, meeting.home_crest, "crest-md")}
+          <span>${escapeHtml(meeting.home_team)}</span>
+        </div>
+        <p class="h2h-score">${meeting.home_goals}–${meeting.away_goals}</p>
+        <div class="h2h-club away">
+          ${crestHtml(meeting.away_team, meeting.away_crest, "crest-md")}
+          <span>${escapeHtml(meeting.away_team)}</span>
+        </div>
+      </div>
+      <p class="h2h-result">${escapeHtml(meeting.result_label || "")}</p>
+    </a>
+  `;
+}
+
+function bindMatchTabs(root) {
+  const tabs = [...root.querySelectorAll("[data-match-tab]")];
+  const panels = [...root.querySelectorAll("[data-match-panel]")];
+  tabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const id = tab.dataset.matchTab;
+      tabs.forEach((item) => {
+        item.classList.toggle("active", item === tab);
+        item.setAttribute("aria-selected", item === tab ? "true" : "false");
+      });
+      panels.forEach((panel) => {
+        panel.hidden = panel.dataset.matchPanel !== id;
+      });
+    });
+  });
+}
+
+async function renderMatchDetail(matchId, requestedKind) {
+  const data = await fetchJson(`/api/matches/${matchId}`);
+  const canonical = data.kind === "result" ? `/results/${matchId}` : `/upcoming/${matchId}`;
+  if (requestedKind && requestedKind !== data.kind) {
+    window.history.replaceState({}, "", canonical);
+  }
+  if (data.kind === "result") {
+    renderResultDetail(data);
+  } else {
+    renderUpcomingDetail(data);
+  }
+  bindCrestFallbacks(view);
+}
+
+function renderUpcomingDetail(data) {
+  const match = data.match;
+  document.getElementById("season-label").textContent = `Premier League · ${data.live_season}`;
+  const note = match.note
+    ? `<span class="note ${match.note === "Draw watch" ? "watch" : ""}">${escapeHtml(match.note)}</span>`
+    : "";
+  const meetings = data.head_to_head || [];
+  const meetingCards = meetings.length
+    ? meetings.map(h2hCard).join("")
+    : `<p class="empty">No previous meetings in the ingested history.</p>`;
+  view.innerHTML = html`
+    <p class="back-row">
+      <a class="pill" data-link href="/upcoming">Back to upcoming</a>
+    </p>
+    <article class="match-hero">
+      <div class="match-meta">
+        <span>${escapeHtml(match.competition || "Premier League")} · ${formatKickoff(match.kickoff_date, match.kickoff_time)}</span>
+        <span class="match-status">${escapeHtml(match.status || "Upcoming")}</span>
+      </div>
+      <div class="match-board">
+        ${teamSide(match.home_team, match.home_crest, match.home_position_label, "home")}
+        <div class="match-center">
+          <p class="match-vs">vs</p>
+          <p class="help">Home vs Away</p>
+        </div>
+        ${teamSide(match.away_team, match.away_crest, match.away_position_label, "away")}
+      </div>
+      ${note}
+    </article>
+    <div class="match-tabs" role="tablist">
+      <button type="button" class="active" data-match-tab="prediction" role="tab" aria-selected="true">Prediction</button>
+      <button type="button" data-match-tab="meetings" role="tab" aria-selected="false">Previous meetings</button>
+    </div>
+    <div data-match-panel="prediction">
+      ${winProbability(match)}
+    </div>
+    <div data-match-panel="meetings" hidden>
+      <section class="h2h-section">
+        <h2>Last ${data.h2h_limit} head-to-head</h2>
+        <p class="help">Played meetings before ${formatKickoff(match.kickoff_date, match.kickoff_time)}. ${data.h2h_count} shown. Open a result for that match’s stats.</p>
+        <div class="h2h-list">${meetingCards}</div>
+      </section>
+    </div>
+  `;
+  bindMatchTabs(view);
+}
+
+function renderResultDetail(data) {
+  const match = data.match;
+  document.getElementById("season-label").textContent = `Premier League · ${data.live_season}`;
+  view.innerHTML = html`
+    <p class="back-row">
+      <a class="pill" data-link href="/results">Back to results</a>
+    </p>
+    <article class="match-hero">
+      <div class="match-meta">
+        <span>${escapeHtml(match.competition || "Premier League")} · ${formatKickoff(match.kickoff_date, match.kickoff_time)}</span>
+        <span class="match-status">${escapeHtml(match.status || "Full-time")}</span>
+      </div>
+      <div class="match-board">
+        ${teamSide(match.home_team, match.home_crest, match.home_position_label, "home")}
+        <div class="match-center">
+          <p class="match-score">${match.home_goals}–${match.away_goals}</p>
+          <p class="help">${escapeHtml(match.actual_outcome || "Full-time")}</p>
+        </div>
+        ${teamSide(match.away_team, match.away_crest, match.away_position_label, "away")}
+      </div>
+    </article>
+    ${winProbability(match, { secondary: true })}
+    <section class="h2h-section">
+      <h2>Match stats</h2>
+      ${teamStatsBlock(match, data.stats || [], data.stats_available)}
+    </section>
+    <section class="h2h-section timeline-note">
+      <h2>Goal timeline</h2>
+      <p class="stats-fallback">${escapeHtml(data.timeline_note || "Goal timeline not available from the current data source")}</p>
+    </section>
+  `;
+}
+
 const routes = {
   "/": renderOverview,
   "/upcoming": renderUpcoming,
@@ -567,8 +848,13 @@ const routes = {
 
 async function render() {
   setNav();
-  const route = routes[pathOf()] || renderOverview;
+  const detail = matchDetailRoute();
   try {
+    if (detail) {
+      await renderMatchDetail(detail.id, detail.kind);
+      return;
+    }
+    const route = routes[pathOf()] || renderOverview;
     await route();
   } catch (error) {
     view.innerHTML = `<p class="empty">${escapeHtml(error.message || "Could not load this page from the database.")}</p>`;

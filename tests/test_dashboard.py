@@ -1,8 +1,12 @@
+from football_dashboard.crests import team_badge, team_initials
 from football_dashboard.formatters import (
     algorithm_label,
     as_percent,
+    extract_match_stats,
+    filter_prior_h2h,
     group_by_date,
     match_note,
+    ordinal,
     paginate,
     predicted_outcome,
 )
@@ -93,3 +97,116 @@ def test_live_scorecard_accuracy_log_loss_and_class_slices():
     assert score["by_actual"]["draw"]["correct"] == 0
     assert score["by_predicted"]["home"]["n"] == 2
     assert score["by_predicted"]["draw"]["n"] == 0
+
+
+def test_ordinal_rank_labels():
+    assert ordinal(1) == "1st"
+    assert ordinal(2) == "2nd"
+    assert ordinal(3) == "3rd"
+    assert ordinal(11) == "11th"
+    assert ordinal(12) == "12th"
+    assert ordinal(21) == "21st"
+
+
+def test_team_badge_uses_public_crest_and_initials_fallback():
+    badge = team_badge("Manchester City")
+    assert badge["crest_url"].endswith("/65.png")
+    assert team_initials("Manchester City") == "MC"
+    assert team_initials("Brighton & Hove Albion") == "BHA"
+    unknown = team_badge("Not A Club")
+    assert unknown["crest_url"] is None
+    assert unknown["initials"] == "NAC"
+
+
+def test_extract_match_stats_keeps_only_real_csv_values():
+    rows = extract_match_stats(
+        {
+            "HS": "14",
+            "AS": "16",
+            "HST": "6",
+            "AST": "6",
+            "HF": "12",
+            "AF": "7",
+            "HY": "2",
+            "AY": "3",
+            "HR": "0",
+            "AR": "0",
+            "HC": "6",
+            "AC": "4",
+        }
+    )
+    keys = [row["key"] for row in rows]
+    assert keys == [
+        "shots",
+        "shots_on_target",
+        "fouls",
+        "yellow_cards",
+        "red_cards",
+        "corners",
+    ]
+    assert "possession" not in keys
+    assert "passes" not in keys
+    assert "pass_accuracy" not in keys
+    assert "offsides" not in keys
+    shots = next(row for row in rows if row["key"] == "shots")
+    assert shots["home"] == 14
+    assert shots["away"] == 16
+    assert shots["leader"] == "away"
+
+
+def test_extract_match_stats_empty_when_payload_has_no_stats():
+    assert extract_match_stats(None) == []
+    assert extract_match_stats({}) == []
+    assert extract_match_stats({"HS": "", "AS": "", "HomeTeam": "Arsenal"}) == []
+    assert extract_match_stats({"HS": "10"}) == []
+
+
+def test_prior_h2h_keeps_only_played_meetings_before_fixture():
+    meetings = [
+        {
+            "match_id": 1,
+            "kickoff_date": "2024-04-01",
+            "home_team": "Arsenal",
+            "away_team": "Chelsea",
+            "is_played": True,
+        },
+        {
+            "match_id": 2,
+            "kickoff_date": "2025-12-01",
+            "home_team": "Chelsea",
+            "away_team": "Arsenal",
+            "is_played": True,
+        },
+        {
+            "match_id": 3,
+            "kickoff_date": "2026-09-13",
+            "home_team": "Arsenal",
+            "away_team": "Chelsea",
+            "is_played": False,
+        },
+        {
+            "match_id": 4,
+            "kickoff_date": "2023-01-01",
+            "home_team": "Arsenal",
+            "away_team": "Liverpool",
+            "is_played": True,
+        },
+        {
+            "match_id": 5,
+            "kickoff_date": "2026-10-01",
+            "home_team": "Chelsea",
+            "away_team": "Arsenal",
+            "is_played": True,
+        },
+    ]
+    selected = filter_prior_h2h(
+        meetings,
+        fixture_date="2026-09-13",
+        fixture_match_id=3,
+        home_team="Arsenal",
+        away_team="Chelsea",
+        limit=5,
+    )
+    assert [row["match_id"] for row in selected] == [2, 1]
+    assert all(row["kickoff_date"] < "2026-09-13" for row in selected)
+    assert all({row["home_team"], row["away_team"]} == {"Arsenal", "Chelsea"} for row in selected)

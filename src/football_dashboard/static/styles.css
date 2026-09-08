@@ -476,6 +476,62 @@ button.ghost {
   font-size: 1.15rem;
 }
 
+.forecast-panel {
+  margin-bottom: 16px;
+  overflow: hidden;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.forecast-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.92rem;
+}
+
+.forecast-table th,
+.forecast-table td {
+  text-align: left;
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.forecast-table th {
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.forecast-table td.rank {
+  color: var(--muted);
+  width: 2rem;
+}
+
+.forecast-table td.team-cell {
+  font-weight: 600;
+  white-space: normal;
+}
+
+.forecast-table td.title-cell {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.forecast-table tr.contender {
+  background: var(--accent-dim);
+}
+
+.forecast-table tr.contender td.team-cell .note {
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
 @media (max-width: 860px) {
   .stat-grid,
   .split,

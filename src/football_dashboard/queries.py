@@ -368,6 +368,19 @@ def results_payload(
     }
 
 
+def forecast_payload() -> dict:
+    """Read the pipeline-generated forecast. Does not retrain or resimulate."""
+    from football_pipeline.season_sim import load_dashboard_forecast
+
+    model = production_model()
+    report = load_dashboard_forecast()
+    return {
+        "model": model,
+        "live_season": LIVE_SEASON,
+        **report,
+    }
+
+
 def performance_payload() -> dict:
     settled = settled_live_fixtures()
     score = live_scorecard(settled)

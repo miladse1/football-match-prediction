@@ -66,7 +66,7 @@ Rows where either club has fewer than 5 prior matches are dropped from training.
 
 ## Airflow DAG
 
-`football_match_pipeline` is manual (`schedule=None`). Default Trigger: competition `E0`, start year `2018`, end season `auto`, local CSV blank.
+`football_match_pipeline` runs Mondays and Thursdays at 06:00 America/New_York (`schedule="0 6 * * 1,4"`, `catchup=False`, `max_active_runs=1`). Manual Trigger still uses the same defaults: competition `E0`, start year `2018`, end season `auto`, local CSV blank.
 
 1. `migrate_db`
 2. `ingest_raw`
@@ -76,6 +76,7 @@ Rows where either club has fewer than 5 prior matches are dropped from training.
 6. `assemble_training_table`
 7. `train_evaluate`
 8. `predict_upcoming`
+9. `season_forecast`
 
 Business logic lives in `src/football_pipeline/`, not in the DAG file.
 

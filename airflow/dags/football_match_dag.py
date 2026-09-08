@@ -3,26 +3,31 @@
 Business logic lives in football_pipeline.tasks. This file only names the steps
 and their order so retries and logs are per stage.
 
-Normal Trigger (leave the form as-is): Premier League (E0) from 2018/19 through
-the current August–July season. Local CSV path is optional and blank. Override
-the params only for a backfill or a local CSV.
+Scheduled: 06:00 America/New_York on Mondays and Thursdays. Manual Trigger still
+works with the same defaults: Premier League (E0) from 2018/19 through the
+current August–July season. Local CSV path is optional and blank. Override the
+params only for a backfill or a local CSV.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 
+import pendulum
 from airflow.decorators import dag, task
 from airflow.models.param import Param
 from airflow.operators.python import get_current_context
 
+LOCAL_TZ = "America/New_York"
+
 
 @dag(
     dag_id="football_match_pipeline",
-    description="Ingest Premier League seasons + upcoming fixtures → Spark features → walk-forward selection → predict upcoming",
-    start_date=datetime(2023, 8, 1),
-    schedule=None,
+    description="Ingest Premier League seasons + upcoming fixtures → Spark features → walk-forward selection → predict upcoming → season forecast",
+    start_date=pendulum.datetime(2023, 8, 1, tz=LOCAL_TZ),
+    schedule="0 6 * * 1,4",
     catchup=False,
+    max_active_runs=1,
     default_args={
         "owner": "football",
         "retries": 1,
@@ -117,6 +122,12 @@ def football_match_pipeline():
 
         return predict_upcoming_matches()
 
+    @task
+    def season_forecast() -> dict:
+        from football_pipeline.tasks import simulate_live_season
+
+        return simulate_live_season()
+
     (
         migrate_db()
         >> ingest_raw()
@@ -126,6 +137,7 @@ def football_match_pipeline():
         >> assemble_training_table()
         >> train_evaluate()
         >> predict_upcoming()
+        >> season_forecast()
     )
 
 

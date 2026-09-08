@@ -119,3 +119,22 @@ def predict_upcoming_matches() -> dict:
     payload = {"n_upcoming": len(records), "algorithm": records[0]["algorithm"] if records else None}
     write_pipeline_summary({"upcoming": payload})
     return payload
+
+
+def simulate_live_season() -> dict:
+    """Rebuild the season-forecast artifact from the current database. Raises on failure."""
+    from football_pipeline.season_sim import run_live_forecast
+
+    report = run_live_forecast()
+    favourite = report["teams"][0]["team"] if report.get("teams") else None
+    summary = {
+        "n_sims": report["n_sims"],
+        "seed": report["seed"],
+        "n_completed": report["n_completed"],
+        "n_remaining": report["n_remaining"],
+        "generated_at": report["generated_at"],
+        "predictions_updated_at": report["predictions_updated_at"],
+        "title_favourite": favourite,
+    }
+    write_pipeline_summary({"season_forecast": summary})
+    return summary

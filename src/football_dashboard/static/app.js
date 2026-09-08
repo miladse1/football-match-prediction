@@ -59,6 +59,18 @@ function pct(value) {
   return `${Math.round(value * 100)}%`;
 }
 
+function fmtPct(value) {
+  if (value == null) return "—";
+  const pctValue = value * 100;
+  if (pctValue >= 1) return `${pctValue.toFixed(1)}%`;
+  return `${pctValue.toFixed(2)}%`;
+}
+
+function fmtNum(value, digits = 1) {
+  if (value == null) return "—";
+  return Number(value).toFixed(digits);
+}
+
 function html(strings, ...values) {
   return strings.reduce((out, chunk, i) => out + chunk + (values[i] ?? ""), "");
 }
@@ -199,7 +211,16 @@ function bindFilters(basePath) {
 
 async function fetchJson(url) {
   const response = await fetch(url);
-  if (!response.ok) throw new Error("load failed");
+  if (!response.ok) {
+    let detail = "Could not load this page from the database.";
+    try {
+      const body = await response.json();
+      if (body.detail) detail = body.detail;
+    } catch (error) {
+      /* keep default */
+    }
+    throw new Error(detail);
+  }
   return response.json();
 }
 
@@ -453,10 +474,93 @@ async function renderAbout() {
   `;
 }
 
+async function renderForecast() {
+  const data = await fetchJson("/api/forecast");
+  document.getElementById("season-label").textContent = `Premier League · ${data.live_season}`;
+  const rows = (data.teams || [])
+    .map((row, index) => {
+      const cls = row.contender ? "contender" : "";
+      return html`
+        <tr class="${cls}">
+          <td class="rank">${index + 1}</td>
+          <td class="team-cell">${escapeHtml(row.team)}${row.contender ? ` <span class="note watch">Title race</span>` : ""}</td>
+          <td class="title-cell">${fmtPct(row.title_prob)}</td>
+          <td>${fmtPct(row.top4_prob)}</td>
+          <td>${fmtPct(row.relegation_prob)}</td>
+          <td>${fmtNum(row.expected_position)}</td>
+          <td>${fmtNum(row.expected_points)}</td>
+          <td class="muted">${row.current_points} pts · ${row.current_played} played</td>
+        </tr>
+      `;
+    })
+    .join("");
+  view.innerHTML = html`
+    <div class="page-head">
+      <div>
+        <p class="eyebrow">Frozen remaining-fixture probabilities · ${data.n_sims.toLocaleString("en-GB")} simulations · seed ${data.seed}</p>
+        <h1>Season Forecast</h1>
+        <p class="lede">Each remaining 2026/27 match is sampled from the stored Home/Draw/Away probabilities after the Airflow pipeline writes this forecast. The production model is not retrained and those probabilities are not rewritten.</p>
+      </div>
+    </div>
+    <section class="stat-grid">
+      <article class="stat-card">
+        <h2>Predictions updated</h2>
+        <p class="stat-value">${formatStamp(data.predictions_updated_at)}</p>
+        <p class="help">${data.model.model_name} · ${data.feature_version}</p>
+      </article>
+      <article class="stat-card">
+        <h2>Forecast generated</h2>
+        <p class="stat-value">${formatStamp(data.generated_at)}</p>
+        <p class="help">${data.n_sims.toLocaleString("en-GB")} simulations</p>
+      </article>
+      <article class="stat-card">
+        <h2>Completed matches</h2>
+        <p class="stat-value">${data.n_completed}</p>
+        <p class="help">Current 2026/27 table</p>
+      </article>
+      <article class="stat-card">
+        <h2>Remaining fixtures</h2>
+        <p class="stat-value">${data.n_remaining}</p>
+        <p class="help">Unplayed matches with stored probabilities</p>
+      </article>
+    </section>
+    <article class="panel forecast-panel">
+      <h2>Club outlook</h2>
+      <p class="help" style="margin-bottom:12px">Title favourite: <strong class="predicted">${data.teams.length ? escapeHtml(data.teams[0].team) : "—"}</strong> ${data.teams.length ? fmtPct(data.teams[0].title_prob) : ""}</p>
+      <div class="table-wrap">
+        <table class="forecast-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Club</th>
+              <th>Title %</th>
+              <th>Top 4 %</th>
+              <th>Relegation %</th>
+              <th>Expected pos.</th>
+              <th>Expected pts</th>
+              <th>Now</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </article>
+    <article class="panel">
+      <h2>Tie-break limitation</h2>
+      <p class="help">${escapeHtml(data.tiebreak)}</p>
+    </article>
+    <article class="panel">
+      <h2>Early-season limitation</h2>
+      <p class="help">${escapeHtml(data.early_season_note || "")}</p>
+    </article>
+  `;
+}
+
 const routes = {
   "/": renderOverview,
   "/upcoming": renderUpcoming,
   "/results": renderResults,
+  "/forecast": renderForecast,
   "/performance": renderPerformance,
   "/about": renderAbout,
 };
@@ -467,7 +571,7 @@ async function render() {
   try {
     await route();
   } catch (error) {
-    view.innerHTML = `<p class="empty">Could not load this page from the database.</p>`;
+    view.innerHTML = `<p class="empty">${escapeHtml(error.message || "Could not load this page from the database.")}</p>`;
   }
 }
 

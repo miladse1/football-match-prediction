@@ -50,7 +50,7 @@ Python, PostgreSQL, Apache Airflow 2.10, PySpark 3.5, pandas, scikit-learn, XGBo
 
 PostgreSQL holds `raw_match_payloads`, `competitions`, `seasons`, `teams`, `matches`, `match_features`, `training_rows`, `model_runs`, and `predictions`.
 
-The DAG `football_match_pipeline` is **manual** (`schedule=None`):
+The DAG `football_match_pipeline` runs the same full path on a schedule **and** on demand (Airflow **Trigger**):
 
 1. `migrate_db`
 2. `ingest_raw` — download season CSVs
@@ -60,6 +60,9 @@ The DAG `football_match_pipeline` is **manual** (`schedule=None`):
 6. `assemble_training_table` — chrono split, drop clubs with fewer than 5 prior matches
 7. `train_evaluate` — walk-forward, then one production retrain
 8. `predict_upcoming` — score `is_played = false` rows; skip updates once a match is played
+9. `season_forecast` — Monte Carlo title/top-4/relegation outlook from frozen probabilities
+
+Schedule: `0 6 * * 1,4` (Monday and Thursday 06:00 **America/New_York**). Catchup is off. At most one run at a time.
 
 ## Feature engineering
 
@@ -191,7 +194,7 @@ CLI equivalent (do not pass `--conf`):
 docker compose exec airflow-scheduler airflow dags trigger football_match_pipeline
 ```
 
-Reload the dashboard after the run succeeds. The DAG does not run on a timer.
+Reload the dashboard after the run succeeds. The same DAG also runs automatically at 06:00 America/New_York on Mondays and Thursdays (`0 6 * * 1,4`). Catchup is disabled, and `max_active_runs=1` skips a new run while one is already going.
 
 Stop services: `docker compose stop`. Start the dashboard later with `docker compose up -d postgres dashboard`.
 

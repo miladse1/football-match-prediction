@@ -10,14 +10,16 @@ from fastapi.staticfiles import StaticFiles
 
 from football_dashboard.queries import (
     about_payload,
+    forecast_payload,
     overview_payload,
     performance_payload,
     results_payload,
     upcoming_payload,
 )
+from football_pipeline.season_sim import ForecastUnavailable
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-SPA_PAGES = {"upcoming", "results", "performance", "about"}
+SPA_PAGES = {"upcoming", "results", "performance", "forecast", "about"}
 
 app = FastAPI(title="Premier League predictions", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -84,6 +86,14 @@ def performance() -> dict:
 @app.get("/api/about")
 def about() -> dict:
     return about_payload()
+
+
+@app.get("/api/forecast")
+def forecast() -> dict:
+    try:
+        return forecast_payload()
+    except ForecastUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/{page}")

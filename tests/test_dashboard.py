@@ -10,7 +10,7 @@ from football_dashboard.formatters import (
     paginate,
     predicted_outcome,
 )
-from football_dashboard.queries import live_scorecard
+from football_dashboard.queries import _serialize_fixture, live_scorecard
 
 
 def test_as_percent_rounds_to_readable_whole_numbers():
@@ -210,3 +210,34 @@ def test_prior_h2h_keeps_only_played_meetings_before_fixture():
     assert [row["match_id"] for row in selected] == [2, 1]
     assert all(row["kickoff_date"] < "2026-09-13" for row in selected)
     assert all({row["home_team"], row["away_team"]} == {"Arsenal", "Chelsea"} for row in selected)
+
+
+def test_historical_result_serialization_hides_prediction_fields():
+    row = {
+        "match_id": 3126,
+        "match_date": "2026-03-03",
+        "kickoff_time": None,
+        "home_team": "Bournemouth",
+        "away_team": "Brentford",
+        "home_goals": 0,
+        "away_goals": 0,
+        "result_code": 1,
+        "p_home": 0.49,
+        "p_draw": 0.29,
+        "p_away": 0.22,
+        "predicted_class": 2,
+        "algorithm": "logistic_regression",
+        "feature_version": "v2-draw-aware",
+        "predicted_at": None,
+    }
+    hidden = _serialize_fixture(row, include_result=True, include_prediction=False)
+    assert hidden["has_prediction"] is False
+    assert "p_home" not in hidden
+    assert "predicted_outcome" not in hidden
+    assert hidden["correct"] is None
+    assert hidden["actual_outcome"] == "Draw"
+    shown = _serialize_fixture(row, include_result=True, include_prediction=True)
+    assert shown["has_prediction"] is True
+    assert shown["predicted_outcome"] == "Bournemouth"
+    assert shown["correct"] is False
+

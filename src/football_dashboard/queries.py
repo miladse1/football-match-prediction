@@ -82,7 +82,7 @@ def _has_prediction(row: dict) -> bool:
     return row.get("predicted_class") is not None and row.get("p_home") is not None
 
 
-def _serialize_fixture(row: dict, *, include_result: bool) -> dict:
+def _serialize_fixture(row: dict, *, include_result: bool, include_prediction: bool = True) -> dict:
     home = row["home_team"]
     away = row["away_team"]
     payload = {
@@ -95,7 +95,7 @@ def _serialize_fixture(row: dict, *, include_result: bool) -> dict:
         "away_crest": team_badge(away),
         "has_prediction": False,
     }
-    if _has_prediction(row):
+    if include_prediction and _has_prediction(row):
         predicted = int(row["predicted_class"])
         payload.update(
             {
@@ -575,6 +575,7 @@ def match_detail_payload(match_id: int) -> dict | None:
                 SELECT m.id AS match_id, m.match_date, m.kickoff_time, m.is_played,
                        m.home_team_id, m.away_team_id,
                        m.home_goals, m.away_goals, m.result_code,
+                       s.start_year,
                        home.canonical_name AS home_team,
                        away.canonical_name AS away_team,
                        c.name AS competition_name,
@@ -585,6 +586,7 @@ def match_detail_payload(match_id: int) -> dict | None:
                 JOIN teams AS home ON home.id = m.home_team_id
                 JOIN teams AS away ON away.id = m.away_team_id
                 JOIN competitions AS c ON c.id = m.competition_id
+                JOIN seasons AS s ON s.id = m.season_id
                 LEFT JOIN LATERAL (
                     SELECT p.p_away, p.p_draw, p.p_home, p.predicted_class,
                            p.created_at AS predicted_at, r.algorithm, r.feature_version
@@ -617,7 +619,12 @@ def match_detail_payload(match_id: int) -> dict | None:
     played = bool(row["is_played"])
     if not played and not _has_prediction(row):
         return None
-    fixture = _serialize_fixture(row, include_result=played)
+    live_settled = played and int(row["start_year"]) == LIVE_START_YEAR
+    fixture = _serialize_fixture(
+        row,
+        include_result=played,
+        include_prediction=(not played) or live_settled,
+    )
     fixture["competition"] = competition_label(row.get("competition_name"))
     fixture["status"] = "Full-time" if played else "Upcoming"
     _apply_table_ranks(fixture)

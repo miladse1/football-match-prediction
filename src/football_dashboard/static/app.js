@@ -628,7 +628,8 @@ function teamSide(name, crest, positionLabel, align) {
 
 function winProbability(match, { secondary = false } = {}) {
   if (!match.has_prediction) {
-    return `<section class="win-prob ${secondary ? "is-secondary" : ""}"><p class="help">No stored pre-match prediction for this fixture.</p></section>`;
+    if (secondary) return "";
+    return `<section class="win-prob"><p class="help">No stored pre-match prediction for this fixture.</p></section>`;
   }
   const predicted = match.predicted_outcome;
   const homeOn = predicted === match.home_team ? "is-predicted" : "";
@@ -825,15 +826,19 @@ function renderResultDetail(data) {
         ${teamSide(match.away_team, match.away_crest, match.away_position_label, "away")}
       </div>
     </article>
-    ${winProbability(match, { secondary: true })}
+    ${match.has_prediction ? winProbability(match, { secondary: true }) : ""}
     <section class="h2h-section">
       <h2>Match stats</h2>
       ${teamStatsBlock(match, data.stats || [], data.stats_available)}
     </section>
-    <section class="h2h-section timeline-note">
-      <h2>Goal timeline</h2>
-      <p class="stats-fallback">${escapeHtml(data.timeline_note || "Goal timeline not available from the current data source")}</p>
-    </section>
+    ${
+      data.timeline_available
+        ? html`<section class="h2h-section timeline-note">
+            <h2>Goal timeline</h2>
+            <p class="help">Goal scorers from the ingested source.</p>
+          </section>`
+        : ""
+    }
   `;
 }
 

@@ -68,6 +68,9 @@ def evaluate_split(y_true: np.ndarray, proba: np.ndarray, y_pred: np.ndarray | N
     )
     onehot = np.eye(3)[np.asarray(y_true, dtype=int)]
     brier = float(np.mean(np.sum((proba - onehot) ** 2, axis=1)))
+    brier_by_class = {
+        CLASS_NAMES[i]: float(np.mean((proba[:, i] - onehot[:, i]) ** 2)) for i in ALL_CLASSES
+    }
     p_draw = proba[:, 1]
     pred = y_pred
     draw_mask = np.asarray(y_true) == 1
@@ -76,6 +79,7 @@ def evaluate_split(y_true: np.ndarray, proba: np.ndarray, y_pred: np.ndarray | N
         "accuracy": float(accuracy_score(y_true, y_pred)),
         "log_loss": float(log_loss(y_true, proba, labels=ALL_CLASSES)),
         "brier": brier,
+        "brier_by_class": brier_by_class,
         "f1_macro": float(f1_macro),
         "precision_macro": float(p_macro),
         "recall_macro": float(r_macro),

@@ -11,6 +11,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from xgboost import XGBClassifier
 
+from football_pipeline.constants import PRODUCTION_ALGORITHMS
 from football_pipeline.dataset import FEATURE_COLUMNS
 from football_pipeline.metrics import pad_proba
 
@@ -127,6 +128,12 @@ SKLEARN_MODELS = {
     "random_forest": random_forest_pipeline,
     "xgboost": xgboost_pipeline,
 }
+
+# The dependency-free name list in constants must stay in step with the
+# pipelines built here. test_registry asserts this too.
+assert set(SKLEARN_MODELS) == set(PRODUCTION_ALGORITHMS), (
+    "SKLEARN_MODELS and constants.PRODUCTION_ALGORITHMS have drifted apart"
+)
 
 
 def predict_proba_3way(estimator, X: np.ndarray) -> np.ndarray:

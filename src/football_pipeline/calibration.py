@@ -2,8 +2,10 @@
 
 Diagnosis only. Does not write model_runs, predictions, or artifacts used by
 the dashboard. Walk-forward folds are refit with the same unweighted logreg
-pipeline. The 2025/26 test uses stored production probabilities when present,
+pipeline. The holdout season uses stored production probabilities when present,
 otherwise the same production retrain procedure without saving the model.
+
+Season labels are derived from football_pipeline.seasons, not hardcoded.
 """
 
 from __future__ import annotations
@@ -43,6 +45,8 @@ CLASS_INDEX = {"away": 0, "draw": 1, "home": 2}
 CLASS_NAMES = ("away", "draw", "home")
 MIN_BIN_N = 30
 BIN_WIDTH = 0.05
+# Report key for the holdout block. Derived so it tracks the rolling holdout season.
+TEST_SPLIT_KEY = f"test_{TEST_SEASON_NAME.replace('/', '_')}"
 
 
 def class_brier(y_true: np.ndarray, p_class: np.ndarray, cls: int) -> float:
@@ -211,16 +215,20 @@ def collect_oos_predictions(frame: pd.DataFrame) -> pd.DataFrame:
     if stored is not None:
         test_proba = stored
         test_source = "stored_production_predictions"
-        logger.info("2025/26 test n=%s from stored production predictions", len(test))
+        logger.info("%s test n=%s from stored production predictions", TEST_SEASON_NAME, len(test))
     else:
         test_proba = _score_logreg(production_train, test)
         test_source = "refit_production_procedure"
-        logger.info("2025/26 test n=%s from refit production procedure (no stored rows)", len(test))
+        logger.info(
+            "%s test n=%s from refit production procedure (no stored rows)",
+            TEST_SEASON_NAME,
+            len(test),
+        )
     y_test = target_vector(test)
     for row, probs, result in zip(test.itertuples(index=False), test_proba, y_test, strict=True):
         records.append(
             {
-                "split": "test_2025_26",
+                "split": TEST_SPLIT_KEY,
                 "fold": TEST_SEASON_NAME,
                 "match_id": int(row.match_id),
                 "match_date": str(row.match_date),
@@ -276,10 +284,13 @@ def _verdict(draw: dict) -> dict:
 
 def build_report(preds: pd.DataFrame) -> dict:
     wf = preds[preds["split"] == "walkforward"]
-    test = preds[preds["split"] == "test_2025_26"]
-    walkforward = summarize_block("walk-forward validation folds (2021/22–2024/25)", wf)
-    test_block = summarize_block("untouched 2025/26 test", test)
-    pooled = summarize_block("pooled out-of-sample (walk-forward + 2025/26 test)", preds)
+    test = preds[preds["split"] == TEST_SPLIT_KEY]
+    fold_span = f"{WALKFORWARD_FOLDS[0].name}–{WALKFORWARD_FOLDS[-1].name}"
+    walkforward = summarize_block(f"walk-forward validation folds ({fold_span})", wf)
+    test_block = summarize_block(f"untouched {TEST_SEASON_NAME} test", test)
+    pooled = summarize_block(
+        f"pooled out-of-sample (walk-forward + {TEST_SEASON_NAME} test)", preds
+    )
     return {
         "model": "logistic_regression",
         "model_label": "Unweighted logistic regression (production)",
@@ -289,11 +300,11 @@ def build_report(preds: pd.DataFrame) -> dict:
         "difference_meaning": "actual_frequency minus mean_predicted; positive means more events than predicted (underpredicted)",
         "test_probability_source": preds.attrs.get("test_source"),
         "walkforward": walkforward,
-        "test_2025_26": test_block,
+        TEST_SPLIT_KEY: test_block,
         "pooled_oos": pooled,
         "verdict": {
             "walkforward": _verdict(walkforward["classes"]["draw"]),
-            "test_2025_26": _verdict(test_block["classes"]["draw"]),
+            TEST_SPLIT_KEY: _verdict(test_block["classes"]["draw"]),
             "pooled_oos": _verdict(pooled["classes"]["draw"]),
         },
         "argmax_note": (
@@ -312,7 +323,7 @@ def _write_predictions_csv(preds: pd.DataFrame) -> None:
 
 def _write_bins_csv(report: dict) -> None:
     rows = []
-    for block_key in ("walkforward", "test_2025_26", "pooled_oos"):
+    for block_key in ("walkforward", TEST_SPLIT_KEY, "pooled_oos"):
         block = report[block_key]
         for cls_name, payload in block["classes"].items():
             for bucket in payload["bins"]:
@@ -391,7 +402,8 @@ def write_artifacts(preds: pd.DataFrame, report: dict) -> None:
         _svg_reliability(
             pooled_draw,
             "Draw reliability — unweighted logistic regression",
-            "Walk-forward 2021/22–2024/25 plus untouched 2025/26 test. Dashed line is perfect calibration.",
+            f"Walk-forward {WALKFORWARD_FOLDS[0].name}–{WALKFORWARD_FOLDS[-1].name} plus untouched "
+            f"{TEST_SEASON_NAME} test. Dashed line is perfect calibration.",
         ),
         encoding="utf-8",
     )

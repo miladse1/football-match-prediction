@@ -4,17 +4,15 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import logging
 
-import joblib
 import pandas as pd
 
 from football_pipeline.config import ROOT
 from football_pipeline.dataset import FEATURE_COLUMNS
 from football_pipeline.db import connect
-from football_pipeline.models import SKLEARN_MODELS, feature_matrix, predict_proba_3way
-from football_pipeline.train import MODEL_DIR, PRODUCTION_MODELS, REPORT_PATH
+from football_pipeline.models import feature_matrix, predict_proba_3way
+from football_pipeline.registry import load_estimator, production_model
 
 logger = logging.getLogger(__name__)
 
@@ -28,54 +26,6 @@ def format_prediction(home: str, away: str, p_away: float, p_draw: float, p_home
         f"  Draw: {p_draw:.0%}\n"
         f"  Away Win: {p_away:.0%}"
     )
-
-
-def _selected_algorithm() -> str:
-    if REPORT_PATH.is_file():
-        report = json.loads(REPORT_PATH.read_text(encoding="utf-8"))
-        name = report.get("selected_by_walkforward_log_loss") or report.get("selected_by_valid_log_loss")
-        if name in PRODUCTION_MODELS:
-            return name
-        name = report.get("selected_sklearn_by_valid_log_loss")
-        if name in SKLEARN_MODELS:
-            return name
-    with connect() as conn:
-        with conn.cursor() as cur:
-            algorithms = tuple(PRODUCTION_MODELS)
-            placeholders = ", ".join(["%s"] * len(algorithms))
-            cur.execute(
-                f"""
-                SELECT algorithm
-                FROM model_runs
-                WHERE algorithm IN ({placeholders}) AND artifact_path IS NOT NULL
-                ORDER BY trained_at DESC
-                LIMIT 1
-                """,
-                algorithms,
-            )
-            row = cur.fetchone()
-    if not row:
-        raise RuntimeError("No trained production model. Run python -m football_pipeline.train first.")
-    return row[0]
-
-
-def _latest_run_id(algorithm: str) -> int:
-    with connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id
-                FROM model_runs
-                WHERE algorithm = %s
-                ORDER BY trained_at DESC
-                LIMIT 1
-                """,
-                (algorithm,),
-            )
-            row = cur.fetchone()
-    if not row:
-        raise RuntimeError(f"No model_runs row for {algorithm}")
-    return int(row[0])
 
 
 def load_upcoming_frame() -> pd.DataFrame:
@@ -106,18 +56,11 @@ def load_upcoming_frame() -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
-def _predict_proba(algorithm: str, model, frame: pd.DataFrame):
-    if algorithm == "poisson_dixon_coles":
-        return model.predict_proba(frame["home_team_id"], frame["away_team_id"])
-    return predict_proba_3way(model, feature_matrix(frame))
-
-
 def predict_upcoming() -> list[dict]:
-    algorithm = _selected_algorithm()
-    artifact = MODEL_DIR / f"{algorithm}.joblib"
-    if not artifact.is_file():
-        raise RuntimeError(f"Missing {artifact}. Train first.")
-    model = joblib.load(artifact)
+    production = production_model()
+    algorithm = production.algorithm
+    run_id = production.model_run_id
+    model = load_estimator(production)
     frame = load_upcoming_frame()
     if frame.empty:
         logger.info("No unplayed matches with features; skipping upcoming predictions.")
@@ -139,8 +82,7 @@ def predict_upcoming() -> list[dict]:
             )
             writer.writeheader()
         return []
-    proba = _predict_proba(algorithm, model, frame)
-    run_id = _latest_run_id(algorithm)
+    proba = predict_proba_3way(model, feature_matrix(frame))
     records = []
     insert_rows = []
     for row, probs in zip(frame.itertuples(index=False), proba, strict=True):

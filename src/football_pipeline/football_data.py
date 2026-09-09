@@ -8,6 +8,8 @@ import urllib.request
 from datetime import date
 from pathlib import Path
 
+from football_pipeline import seasons
+
 logger = logging.getLogger(__name__)
 
 # www currently 503s; the apex host serves the same CSVs.
@@ -39,18 +41,17 @@ def season_code(start_year: int) -> str:
 
 
 def season_name(start_year: int) -> str:
-    return f"{start_year}/{start_year + 1}"
+    return seasons.long_season_name(start_year)
 
 
 def current_season_start_year(today: date | None = None) -> int:
     """Start year of the Premier League season that contains `today`.
 
-    Seasons run August–July, so they cross the calendar year: 7 Sep 2026 and
-    15 May 2027 are both 2026/27 (start year 2026). The new season begins on
-    1 August (matching the 31 July season-end used in training splits).
+    Thin alias kept for callers and tests. The rule itself lives in
+    football_pipeline.seasons, which is the single source of truth for every
+    season boundary in the project.
     """
-    today = today or date.today()
-    return today.year if today.month >= 8 else today.year - 1
+    return seasons.live_season_start_year(today)
 
 
 _AUTO_YEAR_TOKENS = frozenset({"", "auto", "current", "null", "none"})
@@ -75,7 +76,9 @@ def parse_year_override(value: object) -> int | None:
         raise IngestError(f"Invalid year: {value!r}") from exc
 
 
-def resolve_ingest_start_year(value: object, *, default: int = 2018) -> int:
+def resolve_ingest_start_year(
+    value: object, *, default: int = seasons.DEFAULT_INGEST_START_YEAR
+) -> int:
     parsed = parse_year_override(value)
     return default if parsed is None else parsed
 

@@ -10,6 +10,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from football_pipeline import seasons
+
 ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(ROOT / ".env")
 
@@ -22,19 +24,19 @@ POSTGRES_DB = os.getenv("POSTGRES_DB", "football_match_prediction")
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
 POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
 
-# Chronological split (inclusive end dates).
-# train 2018/19–2023/24, valid 2024/25, test 2025/26 only. 2026/27 is live.
-TRAIN_END = os.getenv("TRAIN_END", "2024-07-31")
-VALID_END = os.getenv("VALID_END", "2025-07-31")
-TEST_END = os.getenv("TEST_END", "2026-07-31")
+# Chronological split (inclusive end dates), derived from today's date so the
+# windows roll forward on 1 August every year. See football_pipeline.seasons.
+# Today: train through 2023/24, valid 2024/25, test (holdout) 2025/26, live 2026/27.
+# The env vars stay supported so a backfill can pin a historical window.
+TRAIN_END = os.getenv("TRAIN_END") or seasons.train_end().isoformat()
+VALID_END = os.getenv("VALID_END") or seasons.valid_end().isoformat()
+TEST_END = os.getenv("TEST_END") or seasons.test_end().isoformat()
 MIN_PRIOR_N = int(os.getenv("MIN_PRIOR_N", "5"))
-INGEST_START_YEAR = int(os.getenv("INGEST_START_YEAR", "2018"))
+INGEST_START_YEAR = int(os.getenv("INGEST_START_YEAR", str(seasons.DEFAULT_INGEST_START_YEAR)))
 _INGEST_END = os.getenv("INGEST_END_YEAR")
 INGEST_END_YEAR = int(_INGEST_END) if _INGEST_END else None
-FIXTURES_URL = os.getenv(
-    "FIXTURES_URL",
-    "https://fixturedownload.com/feed/json/epl-2026",
-)
+# Fixture feed for the live season. Derived, so it does not need editing each August.
+FIXTURES_URL = os.getenv("FIXTURES_URL") or seasons.fixtures_url()
 DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1")
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8500"))
 

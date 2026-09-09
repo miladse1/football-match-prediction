@@ -1,5 +1,7 @@
 # Premier League Match Prediction
 
+[![CI](https://github.com/miladse1/football-match-prediction/actions/workflows/ci.yml/badge.svg)](https://github.com/miladse1/football-match-prediction/actions/workflows/ci.yml)
+
 End-to-end data pipeline and model that estimates **Home / Draw / Away** probabilities for Premier League matches, then serves them in a local dashboard.
 
 The production model is **unweighted logistic regression**. Pre-match probabilities are frozen once a result arrives.
@@ -97,7 +99,9 @@ Unweighted logistic regression had the lowest mean log loss (0.973; median 0.978
 
 ## Walk-forward validation
 
-Expanding window. 2025/26 is **not** used for features, hyperparameters, class weights, thresholds, or model choice. 2026/27 is live-only.
+Expanding window. The holdout season is **not** used for features, hyperparameters, class weights, thresholds, or model choice. The live season is scored only.
+
+Season boundaries are derived from the current date by `src/football_pipeline/seasons.py`, so the whole window rolls forward on 1 August each year rather than being pinned to one set of seasons. As of the 2026/27 season the holdout is 2025/26 and the folds are:
 
 | Fold | Train through | Validate on |
 |---|---|---|
@@ -108,7 +112,7 @@ Expanding window. 2025/26 is **not** used for features, hyperparameters, class w
 
 The winner is retrained on all permitted history through 2024/25, then scored once on 2025/26.
 
-## Untouched 2025/26 test
+## Untouched holdout test (2025/26)
 
 Production logistic regression, n = 375:
 
@@ -169,13 +173,30 @@ PostgreSQL is bound to `127.0.0.1:5432`. Airflow and the dashboard are loopback-
 
 The first pipeline run needs an Airflow Trigger (see below). Spark feature jobs run in Docker; host Python does not need a local Spark install.
 
-Unit tests (no Docker Spark required):
+Unit tests (no Docker, no database, no Spark):
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest
 ```
+
+The Spark leakage tests and the PostgreSQL integration tests are skipped by
+default because the host cannot start Spark. Opt in with:
+
+```bash
+# Spark window / leakage tests (needs Java 17)
+docker compose run --rm -e RUN_SPARK_TESTS=1 --entrypoint "" spark \
+  python -m pytest tests/test_spark_features.py
+
+# Database integration tests (needs the postgres service up).
+# Each test builds and drops its own throwaway database.
+docker compose up -d postgres
+RUN_DB_TESTS=1 pytest tests/test_db_integration.py
+```
+
+GitHub Actions runs all three tiers on every push and pull request: unit tests,
+Spark plus PostgreSQL tests, and an Airflow DAG import check.
 
 ## Refresh data
 
@@ -197,6 +218,14 @@ docker compose exec airflow-scheduler airflow dags trigger football_match_pipeli
 Reload the dashboard after the run succeeds. The same DAG also runs automatically at 06:00 America/New_York on Mondays and Thursdays (`0 6 * * 1,4`). Catchup is disabled, and `max_active_runs=1` skips a new run while one is already going.
 
 Stop services: `docker compose stop`. Start the dashboard later with `docker compose up -d postgres dashboard`.
+
+## Reliability
+
+- **Season windows move on their own.** Training cutoffs, the holdout season, the walk-forward folds, the live season and the fixture-feed URL all come from `seasons.py` and shift on 1 August. Nothing needs editing each August.
+- **Scored history cannot be deleted.** The loader refuses to drop a match that has been played or that already has a stored prediction, even if the upstream feed stops listing it. It logs a warning instead.
+- **Data quality gates.** Incomplete seasons, missing results, implausible club counts, bad Elo values and invalid probabilities fail the relevant Airflow task instead of reaching model training.
+- **Reproducible model artifacts.** Each artifact is named by its `model_runs` id, so an old run always points at the model it actually produced. `registry.py` is the single lookup for the current production model.
+- **No duplicate runs.** A retrain whose inputs and scores are unchanged reuses its existing model run rather than inserting another one plus a full copy of the holdout predictions.
 
 ## Limitations
 

@@ -22,12 +22,20 @@ from football_pipeline.football_data import (
 )
 from football_pipeline.ingest import ingest_season, ingest_seasons
 from football_pipeline.load_matches import load_matches
+from football_pipeline.seasons import season_windows
 from football_pipeline.migrate import apply_migrations
+from football_pipeline.quality import (
+    check_features,
+    check_matches,
+    check_predictions,
+    check_training_rows,
+)
 from football_pipeline.summarize import collect_match_summary, write_pipeline_summary
 
 
 def migrate() -> str:
     apply_migrations()
+    write_pipeline_summary({"season_windows": season_windows()})
     return "ok"
 
 
@@ -59,7 +67,8 @@ def ingest_fixtures(competition: str = "E0") -> dict:
 def load_core(competition: str = "E0", start_year: int | None = None) -> dict:
     loaded = load_matches(competition=resolve_competition(competition), start_year=start_year)
     counts = collect_match_summary()
-    write_pipeline_summary({"load": loaded, "matches": counts})
+    gate = check_matches(counts)
+    write_pipeline_summary({"load": loaded, "matches": counts, "quality_load": gate})
     return {**loaded, "played": counts["played"], "unplayed": counts["unplayed"]}
 
 
@@ -68,7 +77,8 @@ def spark_features() -> int:
 
     written = build_and_store()
     counts = collect_match_summary()
-    write_pipeline_summary({"features": {"rows": written, **counts}})
+    gate = check_features(expected_rows=written)
+    write_pipeline_summary({"features": {"rows": written, **counts}, "quality_features": gate})
     return written
 
 
@@ -79,7 +89,8 @@ def assemble_dataset() -> dict:
         test_end=parse_iso_date(TEST_END),
         min_prior_n=MIN_PRIOR_N,
     )
-    write_pipeline_summary({"training_rows": summary})
+    gate = check_training_rows(summary)
+    write_pipeline_summary({"training_rows": summary, "quality_training_rows": gate})
     return summary
 
 
@@ -117,7 +128,8 @@ def predict_upcoming_matches() -> dict:
 
     records = predict_upcoming()
     payload = {"n_upcoming": len(records), "algorithm": records[0]["algorithm"] if records else None}
-    write_pipeline_summary({"upcoming": payload})
+    gate = check_predictions()
+    write_pipeline_summary({"upcoming": payload, "quality_predictions": gate})
     return payload
 
 

@@ -1,7 +1,11 @@
 """Expanding-window walk-forward folds for out-of-time model selection.
 
-Season boundaries use 31 July, matching TRAIN_END / VALID_END / TEST_END.
-2025/26 is never a validation fold. 2026/27 is not in training_rows.
+Season boundaries use 31 July and are derived from today's date by
+football_pipeline.seasons, so the windows roll forward on 1 August each year
+instead of being pinned to one set of seasons.
+
+The invariant that matters is unchanged: the holdout season is never a
+validation fold, and the live season is never in training_rows.
 """
 
 from __future__ import annotations
@@ -12,6 +16,8 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
+from football_pipeline import seasons
+from football_pipeline.config import INGEST_START_YEAR
 from football_pipeline.metrics import CLASS_NAMES
 
 
@@ -21,7 +27,7 @@ class WalkForwardError(Exception):
 
 def season_end(start_year: int) -> date:
     """Inclusive last date of a season that starts in `start_year` (e.g. 2020 → 2021-07-31)."""
-    return date(start_year + 1, 7, 31)
+    return seasons.season_end(start_year)
 
 
 @dataclass(frozen=True)
@@ -47,18 +53,37 @@ class WalkForwardFold:
             raise WalkForwardError(f"{self.name}: train_end must precede valid_end")
 
 
-# Train through 2020/21 → valid 2021/22, …, train through 2023/24 → valid 2024/25.
-WALKFORWARD_FOLDS = (
-    WalkForwardFold("2021/22", train_through_start_year=2020, valid_start_year=2021),
-    WalkForwardFold("2022/23", train_through_start_year=2021, valid_start_year=2022),
-    WalkForwardFold("2023/24", train_through_start_year=2022, valid_start_year=2023),
-    WalkForwardFold("2024/25", train_through_start_year=2023, valid_start_year=2024),
-)
+def build_folds(
+    today: date | None = None,
+    *,
+    n_folds: int = seasons.DEFAULT_WALKFORWARD_FOLDS,
+    ingest_start_year: int = INGEST_START_YEAR,
+) -> tuple[WalkForwardFold, ...]:
+    """Expanding-window folds ending immediately before the holdout season.
 
-# Retrain on everything through 2024/25; 2025/26 is the untouched test season.
-PRODUCTION_TRAIN_END = season_end(2024)
-TEST_SEASON_END = season_end(2025)
-TEST_SEASON_NAME = "2025/26"
+    Train through 2020/21 → valid 2021/22, …, train through 2023/24 → valid
+    2024/25, when the holdout is 2025/26. The whole sequence shifts by one
+    season on 1 August each year.
+    """
+    valid_years = seasons.walkforward_valid_years(
+        today, n_folds=n_folds, ingest_start_year=ingest_start_year
+    )
+    return tuple(
+        WalkForwardFold(
+            seasons.short_season_name(year),
+            train_through_start_year=year - 1,
+            valid_start_year=year,
+        )
+        for year in valid_years
+    )
+
+
+# Derived at import from today's date. Retrain on everything through the season
+# before the holdout; the holdout itself is scored once, after selection.
+WALKFORWARD_FOLDS = build_folds()
+PRODUCTION_TRAIN_END = seasons.production_train_end()
+TEST_SEASON_END = seasons.holdout_season_end()
+TEST_SEASON_NAME = seasons.holdout_season_name()
 
 SCALAR_METRICS = (
     "log_loss",
@@ -133,7 +158,7 @@ def fold_frames(frame: pd.DataFrame, fold: WalkForwardFold) -> tuple[pd.DataFram
 
 
 def assert_folds_exclude_test_season(frame: pd.DataFrame) -> None:
-    """Walk-forward valid windows must not include 2025/26 or later."""
+    """Walk-forward valid windows must not reach into the holdout season or later."""
     latest_valid = WALKFORWARD_FOLDS[-1].valid_end
     if latest_valid > PRODUCTION_TRAIN_END:
         raise WalkForwardError("Last walk-forward valid season reaches into the test holdout")
@@ -143,7 +168,9 @@ def assert_folds_exclude_test_season(frame: pd.DataFrame) -> None:
         _, valid = fold_frames(frame, fold)
         overlap = set(valid["match_id"]).intersection(set(test_rows["match_id"]))
         if overlap:
-            raise WalkForwardError(f"{fold.name} includes {len(overlap)} 2025/26 test matches")
+            raise WalkForwardError(
+                f"{fold.name} includes {len(overlap)} {TEST_SEASON_NAME} test matches"
+            )
 
 
 def aggregate_scalar_metrics(fold_flat: list[dict]) -> dict:

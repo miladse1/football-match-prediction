@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run unit tests
+        run: pytest -q
+
+  spark-and-db:
+    name: Spark and PostgreSQL tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: football
+          POSTGRES_PASSWORD: football
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U football -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # Leakage tests for the Spark windows, and the real-database integration tests.
+      RUN_SPARK_TESTS: "1"
+      RUN_DB_TESTS: "1"
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: football
+      POSTGRES_PASSWORD: football
+      POSTGRES_DB: postgres
+      SPARK_LOCAL_IP: "127.0.0.1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Spark 3.5 needs a Java 17 runtime.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install with Spark extra
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,spark]"
+
+      - name: Run full suite including Spark and database tests
+        run: pytest -q
+
+  dag:
+    name: Airflow DAG imports
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install with Airflow
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "."
+          pip install "apache-airflow==2.10.4" \
+            --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.10.4/constraints-3.11.txt"
+
+      - name: Parse the DAG
+        env:
+          AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+          AIRFLOW__CORE__DAGS_FOLDER: airflow/dags
+          AIRFLOW_HOME: ${{ runner.temp }}/airflow
+        run: |
+          python - <<'PY'
+          from airflow.models.dagbag import DagBag
+
+          bag = DagBag(dag_folder="airflow/dags", include_examples=False)
+          assert not bag.import_errors, bag.import_errors
+          dag = bag.get_dag("football_match_pipeline")
+          assert dag is not None, "football_match_pipeline not found"
+          expected = {
+              "migrate_db",
+              "ingest_raw",
+              "ingest_fixtures",
+              "load_core_tables",
+              "spark_features",
+              "assemble_training_table",
+              "train_evaluate",
+              "predict_upcoming",
+              "season_forecast",
+          }
+          assert expected <= set(dag.task_ids), sorted(dag.task_ids)
+          print(f"DAG parsed with {len(dag.task_ids)} tasks")
+          PY

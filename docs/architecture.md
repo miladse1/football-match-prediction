@@ -54,15 +54,49 @@ Forbidden: this match’s goals or result; pandas `rolling()` without a shift; f
 
 Spark windows use `rowsBetween(-5, -1)` so the current row is excluded. A unit test plants a fake future result and asserts earlier features do not change.
 
+The loader never deletes a match that has been played or that already carries a
+stored prediction. An incomplete upstream feed logs a warning and preserves the
+row instead, so scored history cannot be destroyed by a bad download.
+
 ## Chronological split
 
-| Role | Dates | Seasons | Used for |
+Every boundary is derived from today's date by `src/football_pipeline/seasons.py`,
+the single source of truth for season logic. Nothing is pinned to a season, so
+the whole window shifts by one season on 1 August each year.
+
+| Role | Rule | Today | Used for |
 |---|---|---|---|
-| History | through 2025-07-31 | 2018/19–2024/25 | Walk-forward windows and the final production retrain |
-| Untouched test | 2025-08-01 through 2026-07-31 | 2025/26 | Evaluated **once** after model selection |
-| Live | after 2026-07-31 | 2026/27 | `predict_upcoming` only |
+| History | through the season before the holdout | 2018/19–2024/25 | Walk-forward windows and the final production retrain |
+| Untouched test | the most recently completed season | 2025/26 | Evaluated **once** after model selection |
+| Live | the season containing today | 2026/27 | `predict_upcoming` only |
+
+Walk-forward folds are the four completed seasons immediately before the
+holdout, clamped so a fold never validates on a season with fewer than two
+seasons of history behind it. The holdout can never be a validation fold; a test
+asserts that invariant at four different points in the calendar.
 
 Rows where either club has fewer than 5 prior matches are dropped from training.
+
+## Data quality gates
+
+`src/football_pipeline/quality.py` runs between stages and fails the Airflow task
+rather than letting bad data reach training:
+
+| After | Checks |
+|---|---|
+| `load_core_tables` | completed seasons have 380 matches, 20 clubs per season, played matches carry a result, plausible draw rate |
+| `spark_features` | one feature row per match, Elo inside 1000–2200, prior-match counts in 0–5 |
+| `assemble_training_table` | every split populated, no NULL Elo, valid result codes |
+| `predict_upcoming` | probabilities in range and summing to 1, `predicted_class` equals the stored argmax |
+
+## Model artifacts and runs
+
+Artifacts are written to `models/<algorithm>-run<NNNNN>.joblib`, keyed by the
+`model_runs` id, so a later run can never overwrite an earlier run's model.
+Production code resolves the current model through
+`src/football_pipeline/registry.py`, which reads `artifact_path` from the run row
+itself. A retrain whose inputs and scores are unchanged reuses its existing run
+instead of inserting a duplicate run and another full set of holdout predictions.
 
 ## Airflow DAG
 

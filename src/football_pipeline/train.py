@@ -1,22 +1,30 @@
-"""Walk-forward selection, then one production retrain and one 2025/26 test."""
+"""Walk-forward selection, then one production retrain and one holdout-season test.
+
+Season boundaries come from football_pipeline.seasons, so the training window
+and the holdout roll forward on 1 August instead of staying pinned.
+"""
 
 from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import logging
+from pathlib import Path
 
 import joblib
 import numpy as np
 import pandas as pd
 from psycopg.types.json import Jsonb
 
+from football_pipeline import seasons
 from football_pipeline.config import ROOT
 from football_pipeline.constants import FEATURE_VERSION
 from football_pipeline.dataset import FEATURE_COLUMNS
 from football_pipeline.db import connect
 from football_pipeline.metrics import CLASS_NAMES, evaluate_split
+from football_pipeline.registry import artifact_path_for_run
 from football_pipeline.models import SKLEARN_MODELS, feature_matrix, predict_proba_3way, target_vector
 from football_pipeline.walkforward import (
     PRODUCTION_TRAIN_END,
@@ -41,13 +49,9 @@ WALKFORWARD_FOLDS_CSV = ROOT / "data" / "processed" / "walkforward_folds.csv"
 WALKFORWARD_SUMMARY_CSV = ROOT / "data" / "processed" / "walkforward_summary.csv"
 FINAL_TEST_JSON = ROOT / "data" / "processed" / "final_test_metrics.json"
 MODEL_DIR = ROOT / "data" / "processed" / "models"
-PRODUCTION_MODELS = set(SKLEARN_MODELS)
-CANDIDATE_MODELS = {
-    "logistic_regression": SKLEARN_MODELS["logistic_regression"],
-    "logistic_regression_balanced": SKLEARN_MODELS["logistic_regression_balanced"],
-    "random_forest": SKLEARN_MODELS["random_forest"],
-    "xgboost": SKLEARN_MODELS["xgboost"],
-}
+# One list, not two. Every buildable sklearn pipeline is a walk-forward candidate.
+CANDIDATE_MODELS = dict(SKLEARN_MODELS)
+PRODUCTION_MODELS = frozenset(CANDIDATE_MODELS)
 
 
 def load_training_frame() -> pd.DataFrame:
@@ -128,6 +132,73 @@ def _insert_run(
             run_id = cur.fetchone()[0]
         conn.commit()
     return run_id
+
+
+def _set_artifact_path(run_id: int, artifact_path: str) -> None:
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE model_runs SET artifact_path = %s WHERE id = %s",
+                (artifact_path, run_id),
+            )
+        conn.commit()
+
+
+def run_fingerprint(
+    *,
+    algorithm: str,
+    feature_version: str,
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    walkforward_mean_log_loss: float,
+    test_log_loss: float,
+) -> str:
+    """Stable identity for one training outcome.
+
+    Two runs over the same history, producing the same model and the same
+    scores, are the same run. Reusing that run instead of inserting a new one is
+    what stops model_runs and predictions growing by hundreds of identical rows
+    on every scheduled execution. Any new match changes the row counts or the
+    metrics, which changes the fingerprint and creates a genuinely new run.
+    """
+    train_start, train_end = _date_bounds(train)
+    test_start, test_end = _date_bounds(test)
+    payload = json.dumps(
+        {
+            "algorithm": algorithm,
+            "feature_version": feature_version,
+            "n_train": int(len(train)),
+            "n_test": int(len(test)),
+            "train_start": str(train_start),
+            "train_end": str(train_end),
+            "test_start": str(test_start),
+            "test_end": str(test_end),
+            "walkforward_mean_log_loss": round(float(walkforward_mean_log_loss), 10),
+            "test_log_loss": round(float(test_log_loss), 10),
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _find_reusable_run(algorithm: str, fingerprint: str) -> tuple[int, str | None] | None:
+    """Newest run with an identical fingerprint, if one exists."""
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, artifact_path
+                FROM model_runs
+                WHERE algorithm = %s
+                  AND feature_version = %s
+                  AND metrics->>'run_fingerprint' = %s
+                ORDER BY trained_at DESC, id DESC
+                LIMIT 1
+                """,
+                (algorithm, FEATURE_VERSION, fingerprint),
+            )
+            row = cur.fetchone()
+    return (int(row[0]), row[1]) if row else None
 
 
 def _store_predictions(run_id: int, frame: pd.DataFrame, proba: np.ndarray) -> None:
@@ -296,8 +367,6 @@ def train_and_evaluate() -> dict:
     factory = CANDIDATE_MODELS[selected]
     production = factory()
     production.fit(feature_matrix(production_train), target_vector(production_train))
-    artifact = MODEL_DIR / f"{selected}.joblib"
-    joblib.dump(production, artifact)
 
     test_proba = predict_proba_3way(production, feature_matrix(test))
     test_metrics = evaluate_split(target_vector(test), test_proba)
@@ -314,24 +383,59 @@ def train_and_evaluate() -> dict:
         test_flat["draw_recall"],
     )
 
+    fingerprint = run_fingerprint(
+        algorithm=selected,
+        feature_version=FEATURE_VERSION,
+        train=production_train,
+        test=test,
+        walkforward_mean_log_loss=summaries[selected]["mean"]["log_loss"],
+        test_log_loss=test_flat["log_loss"],
+    )
     run_metrics = {
         "walkforward_mean_log_loss": summaries[selected]["mean"]["log_loss"],
         "test": test_metrics,
         "selection": selection_reason,
+        "run_fingerprint": fingerprint,
         "note": (
-            f"Retrained on all permitted history through {PRODUCTION_TRAIN_END} (2024/25). "
+            f"Retrained on all permitted history through {PRODUCTION_TRAIN_END} "
+            f"({seasons.short_season_name(seasons.holdout_season_start_year() - 1)}). "
             f"{TEST_SEASON_NAME} evaluated once and was not used for selection."
         ),
     }
-    run_id = _insert_run(
-        algorithm=selected,
-        metrics=run_metrics,
-        train=production_train,
-        valid=None,
-        test=test,
-        artifact_path=str(artifact),
-    )
-    _store_predictions(run_id, test, test_proba)
+
+    reusable = _find_reusable_run(selected, fingerprint)
+    if reusable is not None:
+        run_id, recorded_path = reusable
+        artifact = Path(recorded_path) if recorded_path else artifact_path_for_run(selected, run_id)
+        if not artifact.is_file():
+            joblib.dump(production, artifact)
+            logger.info("Rebuilt missing artifact for reused run %s at %s", run_id, artifact)
+        if recorded_path != str(artifact):
+            _set_artifact_path(run_id, str(artifact))
+        reused = True
+        logger.info(
+            "Training inputs and scores are unchanged; reusing model_run %s instead of "
+            "inserting a duplicate run and %s duplicate holdout prediction rows.",
+            run_id,
+            len(test),
+        )
+    else:
+        run_id = _insert_run(
+            algorithm=selected,
+            metrics=run_metrics,
+            train=production_train,
+            valid=None,
+            test=test,
+            artifact_path=None,
+        )
+        # Versioned by run id, so a later run can never overwrite this artifact
+        # and leave an older model_runs row pointing at the wrong model.
+        artifact = artifact_path_for_run(selected, run_id)
+        joblib.dump(production, artifact)
+        _set_artifact_path(run_id, str(artifact))
+        _store_predictions(run_id, test, test_proba)
+        reused = False
+        logger.info("Inserted model_run %s with artifact %s", run_id, artifact)
 
     walkforward_report = {
         "feature_version": FEATURE_VERSION,
@@ -339,7 +443,8 @@ def train_and_evaluate() -> dict:
         "class_encoding": CLASS_NAMES,
         "methodology": (
             "Expanding-window walk-forward: each fold trains on all earlier seasons "
-            "and validates on the next full season. 2025/26 is held out. 2026/27 is live-only."
+            f"and validates on the next full season. {TEST_SEASON_NAME} is held out. "
+            f"{seasons.short_season_name(seasons.live_season_start_year())} is live-only."
         ),
         "folds": [
             {
@@ -363,6 +468,8 @@ def train_and_evaluate() -> dict:
         "algorithm": selected,
         "model_run_id": run_id,
         "artifact_path": str(artifact),
+        "reused_existing_run": reused,
+        "run_fingerprint": fingerprint,
         "trained_through": PRODUCTION_TRAIN_END.isoformat(),
         "train": _split_summary(production_train),
         "test_season": TEST_SEASON_NAME,
@@ -386,6 +493,10 @@ def train_and_evaluate() -> dict:
         },
         "production_train": _split_summary(production_train),
         "test_holdout": final_test_report["test"],
+        "model_run_id": run_id,
+        "artifact_path": str(artifact),
+        "reused_existing_run": reused,
+        "season_windows": seasons.season_windows(),
         "note": walkforward_report["methodology"],
     }
 
@@ -412,7 +523,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     argparse.ArgumentParser(
-        description="Walk-forward model selection, then one 2025/26 test evaluation."
+        description="Walk-forward model selection, then one holdout-season test evaluation."
     ).parse_args()
     train_and_evaluate()
 

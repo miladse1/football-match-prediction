@@ -51,15 +51,19 @@ def load_matches(*, competition: str | None = None, start_year: int | None = Non
                     inserted += 1
                 else:
                     updated += 1
-            stale = _delete_stale_matches(cur, season_ids=season_ids, keep_ids=kept_ids)
+            stale, protected = _delete_stale_matches(
+                cur, season_ids=season_ids, keep_ids=kept_ids
+            )
         conn.commit()
 
     logger.info(
-        "Load finished: %s raw rows, %s matches inserted, %s matches updated, %s stale dropped, %s teams",
+        "Load finished: %s raw rows, %s matches inserted, %s matches updated, "
+        "%s stale dropped, %s stale preserved, %s teams",
         len(payloads),
         inserted,
         updated,
         stale,
+        protected,
         len(team_ids),
     )
     return {
@@ -67,6 +71,7 @@ def load_matches(*, competition: str | None = None, start_year: int | None = Non
         "matches_inserted": inserted,
         "matches_updated": updated,
         "stale_dropped": stale,
+        "stale_protected": protected,
         "teams": len(team_ids),
     }
 
@@ -190,28 +195,87 @@ def _upsert_match(
     return int(match_id), bool(inserted)
 
 
-def _delete_stale_matches(cur, *, season_ids: set[int], keep_ids: list[int]) -> int:
-    """Drop leftover demo-fixture rows whose date/teams do not match the official CSV."""
+def partition_stale_matches(candidates: list[dict]) -> tuple[list[int], list[dict]]:
+    """Split stale candidates into rows safe to delete and rows that must survive.
+
+    A match is protected when it has already been played, or when a prediction
+    is stored against it. Those two rules exist because the project's core
+    promise is that a prediction, once made, is never rewritten or lost. An
+    incomplete upstream feed must never be able to destroy scored history.
+
+    Only genuinely unplayed, never-predicted fixtures -- rescheduled or dropped
+    placeholder rows -- can be removed.
+    """
+    deletable: list[int] = []
+    protected: list[dict] = []
+    for row in candidates:
+        reasons = []
+        if row.get("is_played"):
+            reasons.append("already played")
+        if int(row.get("prediction_count") or 0) > 0:
+            reasons.append(f"{int(row['prediction_count'])} stored prediction(s)")
+        if reasons:
+            protected.append({**row, "reasons": reasons})
+        else:
+            deletable.append(int(row["id"]))
+    return deletable, protected
+
+
+def _fetch_stale_candidates(cur, *, season_ids: set[int], keep_ids: list[int]) -> list[dict]:
+    cur.execute(
+        """
+        SELECT m.id,
+               m.match_date,
+               m.is_played,
+               (SELECT count(*) FROM predictions AS p WHERE p.match_id = m.id) AS prediction_count
+        FROM matches AS m
+        WHERE m.season_id = ANY(%s) AND NOT (m.id = ANY(%s))
+        ORDER BY m.id
+        """,
+        (list(season_ids), keep_ids),
+    )
+    return [
+        {"id": row[0], "match_date": row[1], "is_played": row[2], "prediction_count": row[3]}
+        for row in cur.fetchall()
+    ]
+
+
+def _delete_stale_matches(cur, *, season_ids: set[int], keep_ids: list[int]) -> tuple[int, int]:
+    """Drop leftover fixture rows that the official feed no longer lists.
+
+    Returns (deleted, protected). Played matches and matches carrying a stored
+    prediction are never deleted; they are logged loudly instead.
+    """
     if not season_ids or not keep_ids:
-        return 0
-    cur.execute(
-        """
-        DELETE FROM predictions
-        WHERE match_id IN (
-            SELECT id FROM matches
-            WHERE season_id = ANY(%s) AND NOT (id = ANY(%s))
+        return 0, 0
+
+    candidates = _fetch_stale_candidates(cur, season_ids=season_ids, keep_ids=keep_ids)
+    if not candidates:
+        return 0, 0
+
+    deletable, protected = partition_stale_matches(candidates)
+
+    for row in protected:
+        logger.warning(
+            "Preserving match id=%s (%s) missing from the current payloads: %s. "
+            "Upstream feed may be incomplete; not deleting scored or predicted history.",
+            row["id"],
+            row.get("match_date"),
+            "; ".join(row["reasons"]),
         )
-        """,
-        (list(season_ids), keep_ids),
-    )
-    cur.execute(
-        """
-        DELETE FROM matches
-        WHERE season_id = ANY(%s) AND NOT (id = ANY(%s))
-        """,
-        (list(season_ids), keep_ids),
-    )
-    return int(cur.rowcount)
+    if protected:
+        logger.warning(
+            "%s stale match(es) preserved because they are played or already predicted.",
+            len(protected),
+        )
+
+    if not deletable:
+        return 0, len(protected)
+
+    cur.execute("DELETE FROM matches WHERE id = ANY(%s)", (deletable,))
+    deleted = int(cur.rowcount)
+    logger.info("Dropped %s unplayed, never-predicted stale fixture row(s)", deleted)
+    return deleted, len(protected)
 
 
 def main() -> None:

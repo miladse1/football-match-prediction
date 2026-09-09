@@ -22,37 +22,20 @@ from football_dashboard.formatters import (
     predicted_outcome,
     result_side_label,
 )
-from football_pipeline.config import ROOT
+from football_pipeline import seasons
+from football_pipeline.config import INGEST_START_YEAR, ROOT
 from football_pipeline.db import connect
+from football_pipeline.registry import production_model as _registry_production_model
 
 REPORT_PATH = ROOT / "data" / "processed" / "model_metrics.json"
-LIVE_START_YEAR = 2026
-LIVE_SEASON = f"{LIVE_START_YEAR}/{str(LIVE_START_YEAR + 1)[2:]}"
+# Derived, not pinned: the live season rolls over on 1 August.
+LIVE_START_YEAR = seasons.live_season_start_year()
+LIVE_SEASON = seasons.short_season_name(LIVE_START_YEAR)
 
 
 def _selected_algorithm() -> str:
-    if REPORT_PATH.is_file():
-        report = json.loads(REPORT_PATH.read_text(encoding="utf-8"))
-        name = report.get("selected_by_walkforward_log_loss") or report.get(
-            "selected_by_valid_log_loss"
-        )
-        if name:
-            return str(name)
-    with connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT algorithm
-                FROM model_runs
-                WHERE artifact_path IS NOT NULL
-                ORDER BY trained_at DESC
-                LIMIT 1
-                """
-            )
-            row = cur.fetchone()
-    if not row:
-        raise RuntimeError("No trained model in model_runs.")
-    return row[0]
+    """Production algorithm name. Resolved by football_pipeline.registry."""
+    return _registry_production_model().algorithm
 
 
 def _iso_date(value) -> str | None:
@@ -130,29 +113,15 @@ def _serialize_fixture(row: dict, *, include_result: bool, include_prediction: b
 
 
 def production_model() -> dict:
-    algorithm = _selected_algorithm()
-    with connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id, algorithm, feature_version, trained_at, artifact_path
-                FROM model_runs
-                WHERE algorithm = %s AND artifact_path IS NOT NULL
-                ORDER BY trained_at DESC
-                LIMIT 1
-                """,
-                (algorithm,),
-            )
-            row = cur.fetchone()
-    if not row:
-        raise RuntimeError(f"No artifact for {algorithm}")
+    """Dashboard view of the canonical production model. Same keys as before."""
+    model = _registry_production_model()
     return {
-        "model_run_id": int(row[0]),
-        "algorithm": row[1],
-        "model_name": algorithm_label(row[1]),
-        "feature_version": row[2],
-        "trained_at": _iso_stamp(row[3]),
-        "artifact_path": row[4],
+        "model_run_id": model.model_run_id,
+        "algorithm": model.algorithm,
+        "model_name": algorithm_label(model.algorithm),
+        "feature_version": model.feature_version,
+        "trained_at": _iso_stamp(model.trained_at),
+        "artifact_path": model.artifact_path,
     }
 
 
@@ -666,6 +635,15 @@ def about_payload() -> dict:
     selected = report.get("selected_by_walkforward_log_loss") or "logistic_regression"
     selected_stats = (walk.get(selected) or {}).get("mean") or {}
     model = production_model()
+    holdout_year = seasons.holdout_season_start_year()
+    holdout_season = seasons.short_season_name(holdout_year)
+    last_train_season = seasons.short_season_name(holdout_year - 1)
+    fold_years = seasons.walkforward_valid_years()
+    fold_span = (
+        f"{seasons.short_season_name(fold_years[0])}–"
+        f"{seasons.short_season_name(fold_years[-1])}"
+    )
+    ingest_season = seasons.short_season_name(INGEST_START_YEAR)
     return {
         "model": model,
         "selection_reason": report.get("selection_reason"),
@@ -700,13 +678,21 @@ def about_payload() -> dict:
             "The current match never enters its own form, Elo, or head-to-head window."
         ),
         "history": {
-            "ingest": "Premier League results from 2018/19 through the current season",
-            "walkforward": "Expanding-window selection on 2021/22–2024/25, training through the previous season each time",
-            "production_train": "Retrain the winner on permitted history through 2024/25",
-            "test": "Untouched 2025/26 holdout, evaluated once after selection",
-            "live": "2026/27 is scored live only and is never used for selection or test metrics",
+            "ingest": f"Premier League results from {ingest_season} through the current season",
+            "walkforward": (
+                f"Expanding-window selection on {fold_span}, training through the "
+                "previous season each time"
+            ),
+            "production_train": (
+                f"Retrain the winner on permitted history through {last_train_season}"
+            ),
+            "test": f"Untouched {holdout_season} holdout, evaluated once after selection",
+            "live": (
+                f"{LIVE_SEASON} is scored live only and is never used for selection "
+                "or test metrics"
+            ),
         },
-        "test_season": test_report.get("test_season") or "2025/26",
+        "test_season": test_report.get("test_season") or holdout_season,
         "test": {
             "n": test.get("n"),
             "accuracy": test.get("accuracy"),
@@ -727,7 +713,8 @@ def about_payload() -> dict:
         },
         "draw_limitation": (
             "The selected unweighted logistic regression assigns meaningful draw probability "
-            "(around 22% on 2025/26) but almost never has Draw as the single most likely class. "
+            f"(around 22% on {holdout_season}) but almost never has Draw as the single most "
+            "likely class. "
             "Argmax therefore rarely, if ever, predicts a draw. That is a known limitation of the "
             "production model, not a UI rounding choice. Predicted labels on this dashboard are "
             "exactly the stored argmax."

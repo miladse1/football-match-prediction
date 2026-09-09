@@ -3,8 +3,10 @@ from datetime import date
 import pandas as pd
 import pytest
 
+from football_pipeline import seasons
 from football_pipeline.walkforward import (
     PRODUCTION_TRAIN_END,
+    build_folds,
     TEST_SEASON_END,
     WALKFORWARD_FOLDS,
     WalkForwardError,
@@ -18,11 +20,12 @@ from football_pipeline.walkforward import (
 )
 
 
-def test_walkforward_folds_are_expanding_and_stop_before_test():
-    assert len(WALKFORWARD_FOLDS) == 4
-    names = [fold.name for fold in WALKFORWARD_FOLDS]
-    assert names == ["2021/22", "2022/23", "2023/24", "2024/25"]
-    train_ends = [fold.train_end for fold in WALKFORWARD_FOLDS]
+def test_walkforward_folds_at_a_fixed_date_match_the_documented_windows():
+    """Pinned to a date so it keeps asserting the same thing after the rollover."""
+    folds = build_folds(date(2026, 9, 9), ingest_start_year=2018)
+    assert len(folds) == 4
+    assert [fold.name for fold in folds] == ["2021/22", "2022/23", "2023/24", "2024/25"]
+    train_ends = [fold.train_end for fold in folds]
     assert train_ends == [
         date(2021, 7, 31),
         date(2022, 7, 31),
@@ -30,10 +33,31 @@ def test_walkforward_folds_are_expanding_and_stop_before_test():
         date(2024, 7, 31),
     ]
     assert train_ends == sorted(train_ends)
-    assert WALKFORWARD_FOLDS[-1].valid_end == date(2025, 7, 31)
+    assert folds[-1].valid_end == date(2025, 7, 31)
+    assert folds[-1].valid_end == seasons.production_train_end(date(2026, 9, 9))
+    assert seasons.holdout_season_end(date(2026, 9, 9)) == date(2026, 7, 31)
+
+
+def test_walkforward_folds_are_expanding_and_stop_before_test():
+    """Invariants that must hold for the live module constants at any date."""
+    assert len(WALKFORWARD_FOLDS) >= 1
+    train_ends = [fold.train_end for fold in WALKFORWARD_FOLDS]
+    assert train_ends == sorted(train_ends)
+    assert len(set(train_ends)) == len(train_ends)
+    for fold in WALKFORWARD_FOLDS:
+        assert fold.train_end < fold.valid_end
+        assert fold.valid_end <= PRODUCTION_TRAIN_END
     assert WALKFORWARD_FOLDS[-1].valid_end == PRODUCTION_TRAIN_END
     assert PRODUCTION_TRAIN_END < TEST_SEASON_END
-    assert TEST_SEASON_END == date(2026, 7, 31)
+    assert TEST_SEASON_END == seasons.holdout_season_end()
+
+
+def test_folds_shift_by_one_season_after_the_august_rollover():
+    before = build_folds(date(2027, 7, 31), ingest_start_year=2018)
+    after = build_folds(date(2027, 8, 1), ingest_start_year=2018)
+    assert [f.name for f in before] == ["2021/22", "2022/23", "2023/24", "2024/25"]
+    assert [f.name for f in after] == ["2022/23", "2023/24", "2024/25", "2025/26"]
+    assert after[-1].valid_end == date(2026, 7, 31)
 
 
 def test_fold_slice_is_strictly_after_train_end():

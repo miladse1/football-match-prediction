@@ -15,8 +15,10 @@ from pathlib import Path
 
 import numpy as np
 
+from football_pipeline import seasons
 from football_pipeline.config import ROOT
 from football_pipeline.db import connect
+from football_pipeline.registry import ProductionModelUnavailable, production_model
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +28,9 @@ class ForecastUnavailable(RuntimeError):
 
 DEFAULT_N_SIMS = 20_000
 DEFAULT_SEED = 202627
-LIVE_START_YEAR = 2026
+# Derived, not pinned: the live season rolls over on 1 August.
+LIVE_START_YEAR = seasons.live_season_start_year()
 ARTIFACT_PATH = ROOT / "data" / "processed" / "season_forecast.json"
-REPORT_PATH = ROOT / "data" / "processed" / "model_metrics.json"
 
 OUTCOME_AWAY = 0
 OUTCOME_DRAW = 1
@@ -262,52 +264,15 @@ def simulate_season(
     }
 
 
-def _selected_algorithm() -> str:
-    if REPORT_PATH.is_file():
-        report = json.loads(REPORT_PATH.read_text(encoding="utf-8"))
-        name = report.get("selected_by_walkforward_log_loss") or report.get(
-            "selected_by_valid_log_loss"
-        )
-        if name:
-            return str(name)
-    with connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT algorithm
-                FROM model_runs
-                WHERE artifact_path IS NOT NULL
-                ORDER BY trained_at DESC
-                LIMIT 1
-                """
-            )
-            row = cur.fetchone()
-    if not row:
-        raise RuntimeError("No trained model in model_runs.")
-    return row[0]
-
-
 def load_live_season(*, start_year: int = LIVE_START_YEAR) -> SeasonSnapshot:
     """SELECT-only snapshot of completed results and frozen remaining probabilities."""
-    algorithm = _selected_algorithm()
-    season_name = f"{start_year}/{str(start_year + 1)[2:]}"
+    model = production_model()
+    model_run_id = model.model_run_id
+    algorithm = model.algorithm
+    feature_version = model.feature_version
+    season_name = seasons.short_season_name(start_year)
     with connect() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id, algorithm, feature_version
-                FROM model_runs
-                WHERE algorithm = %s AND artifact_path IS NOT NULL
-                ORDER BY trained_at DESC
-                LIMIT 1
-                """,
-                (algorithm,),
-            )
-            run = cur.fetchone()
-            if not run:
-                raise RuntimeError(f"No artifact for {algorithm}")
-            model_run_id, algorithm, feature_version = int(run[0]), run[1], run[2]
-
             cur.execute(
                 """
                 SELECT home.canonical_name, away.canonical_name,
@@ -485,7 +450,13 @@ def load_dashboard_forecast() -> dict:
             "Season forecast has not been generated yet. Trigger football_match_pipeline in Airflow."
         )
     report = json.loads(ARTIFACT_PATH.read_text(encoding="utf-8"))
-    snapshot = load_live_season()
+    try:
+        snapshot = load_live_season()
+    except ProductionModelUnavailable as exc:
+        raise ForecastUnavailable(
+            "Season forecast is unavailable because no trained model is registered. "
+            "Trigger football_match_pipeline in Airflow."
+        ) from exc
     if not forecast_matches_snapshot(report, snapshot):
         raise ForecastUnavailable(
             "Season forecast is out of date because the last pipeline run did not "

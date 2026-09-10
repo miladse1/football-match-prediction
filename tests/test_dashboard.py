@@ -241,3 +241,38 @@ def test_historical_result_serialization_hides_prediction_fields():
     assert shown["predicted_outcome"] == "Bournemouth"
     assert shown["correct"] is False
 
+
+
+def test_with_team_crests_adds_display_badges_without_touching_values():
+    """Forecast rows are enriched for display only: no number may change."""
+    from football_dashboard.queries import with_team_crests
+
+    rows = [
+        {"team": "Arsenal", "title_prob": 0.4409, "expected_points": 81.7, "current_points": 9},
+        {"team": "Ipswich Town", "title_prob": 0.0, "expected_points": 25.8, "current_points": 3},
+    ]
+    original = [dict(row) for row in rows]
+    out = with_team_crests(rows)
+
+    assert [row["team"] for row in out] == ["Arsenal", "Ipswich Town"]
+    for before, after in zip(original, out, strict=True):
+        for key, value in before.items():
+            assert after[key] == value, f"{key} changed"
+    assert out[0]["crest"]["initials"] == "ARS"
+    assert out[1]["crest"]["initials"] == "IT"
+    # The input rows are not mutated in place.
+    assert "crest" not in rows[0]
+
+
+def test_with_team_crests_handles_an_unknown_club():
+    from football_dashboard.queries import with_team_crests
+
+    out = with_team_crests([{"team": "Not A Club", "title_prob": 0.0}])
+    assert out[0]["crest"]["crest_url"] is None
+    assert out[0]["crest"]["initials"] == "NAC"
+
+
+def test_with_team_crests_on_empty_input():
+    from football_dashboard.queries import with_team_crests
+
+    assert with_team_crests([]) == []

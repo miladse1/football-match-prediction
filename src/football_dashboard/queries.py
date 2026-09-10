@@ -163,6 +163,8 @@ def latest_completed_match() -> dict | None:
         "away_goals": row[3],
         "home_team": row[4],
         "away_team": row[5],
+        "home_crest": team_badge(row[4]),
+        "away_crest": team_badge(row[5]),
         "result": row[6],
         "scoreline": f"{row[4]} {row[2]}–{row[3]} {row[5]}",
     }
@@ -361,7 +363,12 @@ def results_payload(
 
 
 def forecast_payload() -> dict:
-    """Read the pipeline-generated forecast. Does not retrain or resimulate."""
+    """Read the pipeline-generated forecast. Does not retrain or resimulate.
+
+    Team rows are enriched with a display crest so the dashboard can render a
+    club badge. That is presentation data only: no simulated value is touched,
+    added, reordered, or recomputed here.
+    """
     from football_pipeline.season_sim import load_dashboard_forecast
 
     model = production_model()
@@ -370,7 +377,13 @@ def forecast_payload() -> dict:
         "model": model,
         "live_season": LIVE_SEASON,
         **report,
+        "teams": with_team_crests(report.get("teams") or []),
     }
+
+
+def with_team_crests(rows: list[dict]) -> list[dict]:
+    """Attach a display badge to each forecast row, preserving order and values."""
+    return [{**row, "crest": team_badge(row["team"])} for row in rows]
 
 
 def performance_payload() -> dict:

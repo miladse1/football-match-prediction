@@ -3,7 +3,7 @@
 from datetime import date
 from pathlib import Path
 
-from football_pipeline.load_matches import partition_stale_matches
+from football_pipeline.load_matches import choose_reschedule_target, partition_stale_matches
 
 
 def _row(match_id, *, is_played=False, prediction_count=0, day=1):
@@ -74,6 +74,29 @@ def test_loader_no_longer_bulk_deletes_predictions():
     source = Path("src/football_pipeline/load_matches.py").read_text(encoding="utf-8")
     assert "DELETE FROM predictions" not in source
     assert "partition_stale_matches" in source
+
+
+def test_reschedule_prefers_the_predicted_unplayed_row():
+    old = _row(10, prediction_count=8, day=26)
+    new = _row(20, day=27)
+    target = choose_reschedule_target([old, new], incoming_played=False)
+    assert target["id"] == 10
+
+
+def test_reschedule_does_not_invent_a_second_fixture_once_played():
+    played = _row(5, is_played=True, prediction_count=1, day=12)
+    target = choose_reschedule_target([played], incoming_played=False)
+    assert target["id"] == 5
+
+
+def test_played_result_attaches_to_the_predicted_placeholder():
+    placeholder = _row(10, prediction_count=8, day=26)
+    target = choose_reschedule_target([placeholder], incoming_played=True)
+    assert target["id"] == 10
+
+
+def test_no_existing_pairing_means_insert():
+    assert choose_reschedule_target([], incoming_played=False) is None
 
 
 def test_loader_reports_preserved_rows_to_the_caller():

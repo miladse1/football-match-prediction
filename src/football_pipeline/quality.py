@@ -170,6 +170,27 @@ def _check_teams_and_results(live_year: int) -> list[str]:
             ghost = int(cur.fetchone()[0])
             if ghost:
                 problems.append(f"{ghost} unplayed match(es) carry a score.")
+
+            cur.execute(
+                """
+                SELECT s.name, count(*) AS pairings
+                FROM (
+                    SELECT season_id, home_team_id, away_team_id
+                    FROM matches
+                    GROUP BY season_id, home_team_id, away_team_id
+                    HAVING count(*) > 1
+                ) AS dups
+                JOIN seasons AS s ON s.id = dups.season_id
+                GROUP BY s.name
+                ORDER BY s.name
+                """
+            )
+            for name, pairings in cur.fetchall():
+                problems.append(
+                    f"Season {name} has {pairings} duplicated home/away pairing(s). "
+                    "A postponed fixture was stored as a second match instead of "
+                    "updating the original row."
+                )
     return problems
 
 

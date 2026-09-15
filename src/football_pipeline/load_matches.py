@@ -129,6 +129,148 @@ def _upsert_team(cur, cache: dict[str, int], source_name: str, canonical_name: s
     return team_id
 
 
+def choose_reschedule_target(existing: list[dict], *, incoming_played: bool) -> dict | None:
+    """Pick the existing (season, home, away) row that should absorb this payload.
+
+    Premier League clubs play each opponent at home once per season. A date
+    change is a postponement of that fixture, not a second match. Prefer the
+    row that already has stored predictions so frozen probabilities stay
+    attached to the same match_id.
+    """
+    if not existing:
+        return None
+    unplayed = [row for row in existing if not row.get("is_played")]
+    played = [row for row in existing if row.get("is_played")]
+
+    def prefer_predicted(rows: list[dict]) -> dict:
+        predicted = [row for row in rows if int(row.get("prediction_count") or 0) > 0]
+        pool = predicted or rows
+        return min(pool, key=lambda row: int(row["id"]))
+
+    if incoming_played:
+        if unplayed:
+            return prefer_predicted(unplayed)
+        if played:
+            return prefer_predicted(played)
+        return None
+    if unplayed:
+        return prefer_predicted(unplayed)
+    if played:
+        return prefer_predicted(played)
+    return None
+
+
+def _pairing_rows(
+    cur,
+    *,
+    competition_id: int,
+    season_id: int,
+    home_team_id: int,
+    away_team_id: int,
+) -> list[dict]:
+    cur.execute(
+        """
+        SELECT m.id,
+               m.match_date,
+               m.is_played,
+               (SELECT count(*) FROM predictions AS p WHERE p.match_id = m.id) AS prediction_count
+        FROM matches AS m
+        WHERE m.competition_id = %s
+          AND m.season_id = %s
+          AND m.home_team_id = %s
+          AND m.away_team_id = %s
+        ORDER BY m.id
+        """,
+        (competition_id, season_id, home_team_id, away_team_id),
+    )
+    return [
+        {
+            "id": int(row[0]),
+            "match_date": row[1],
+            "is_played": bool(row[2]),
+            "prediction_count": int(row[3] or 0),
+        }
+        for row in cur.fetchall()
+    ]
+
+
+def _drop_unprotected_pairing_duplicates(
+    cur,
+    *,
+    keep_id: int,
+    competition_id: int,
+    season_id: int,
+    home_team_id: int,
+    away_team_id: int,
+) -> int:
+    extras = [
+        row
+        for row in _pairing_rows(
+            cur,
+            competition_id=competition_id,
+            season_id=season_id,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+        if row["id"] != keep_id
+    ]
+    deletable, _protected = partition_stale_matches(extras)
+    if not deletable:
+        return 0
+    cur.execute("DELETE FROM matches WHERE id = ANY(%s)", (deletable,))
+    deleted = int(cur.rowcount)
+    if deleted:
+        logger.info(
+            "Dropped %s unprotected duplicate(s) of match id=%s after a date change",
+            deleted,
+            keep_id,
+        )
+    return deleted
+
+
+def _update_existing_match(
+    cur,
+    match_id: int,
+    match: CuratedMatch,
+    source_file: str,
+    *,
+    move_date: bool,
+) -> None:
+    assignments = [
+        "kickoff_time = COALESCE(%s, matches.kickoff_time)",
+        "home_goals = CASE WHEN %s THEN %s ELSE matches.home_goals END",
+        "away_goals = CASE WHEN %s THEN %s ELSE matches.away_goals END",
+        "result = CASE WHEN %s THEN %s ELSE matches.result END",
+        "result_code = CASE WHEN %s THEN %s ELSE matches.result_code END",
+        "is_played = matches.is_played OR %s",
+        "source_file = CASE WHEN %s OR NOT matches.is_played THEN %s ELSE matches.source_file END",
+        "source_row_hash = CASE WHEN %s OR NOT matches.is_played THEN %s ELSE matches.source_row_hash END",
+    ]
+    params: list = [
+        match.kickoff_time,
+        match.is_played,
+        match.home_goals,
+        match.is_played,
+        match.away_goals,
+        match.is_played,
+        match.result,
+        match.is_played,
+        match.result_code,
+        match.is_played,
+        match.is_played,
+        source_file,
+        match.is_played,
+        match.source_row_hash,
+    ]
+    if move_date:
+        assignments.insert(0, "match_date = %s")
+        params.insert(0, match.match_date)
+    cur.execute(
+        f"UPDATE matches SET {', '.join(assignments)} WHERE id = %s",
+        (*params, match_id),
+    )
+
+
 def _upsert_match(
     cur,
     *,
@@ -139,6 +281,36 @@ def _upsert_match(
     match: CuratedMatch,
     source_file: str,
 ) -> tuple[int, bool]:
+    existing = _pairing_rows(
+        cur,
+        competition_id=competition_id,
+        season_id=season_id,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+    )
+    target = choose_reschedule_target(existing, incoming_played=match.is_played)
+    if target is not None:
+        keep_id = int(target["id"])
+        # Free the incoming date before moving the canonical row onto it.
+        _drop_unprotected_pairing_duplicates(
+            cur,
+            keep_id=keep_id,
+            competition_id=competition_id,
+            season_id=season_id,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+        move_date = not bool(target["is_played"])
+        if move_date and target["match_date"] != match.match_date:
+            logger.info(
+                "Rescheduled match id=%s from %s to %s; keeping stored predictions",
+                keep_id,
+                target["match_date"],
+                match.match_date,
+            )
+        _update_existing_match(cur, keep_id, match, source_file, move_date=move_date)
+        return keep_id, False
+
     cur.execute(
         """
         INSERT INTO matches (

@@ -16,7 +16,8 @@ import psycopg
 import pytest
 
 from football_pipeline import config, migrate
-from football_pipeline.load_matches import _delete_stale_matches
+from football_pipeline.load_matches import _delete_stale_matches, _upsert_match
+from football_pipeline.normalize import CuratedMatch
 
 ADMIN_DB = os.getenv("POSTGRES_DB", "postgres")
 
@@ -316,3 +317,80 @@ def test_argmax_check_matches_numpy_tie_breaking(fresh_database):
             conn.commit()
     with pytest.raises(DataQualityError, match="argmax"):
         check_predictions()
+
+
+def test_postponement_keeps_frozen_predictions_and_drops_the_date_duplicate(fresh_database):
+    """A one-day postponement must not create a second match_id."""
+    with _connect(fresh_database) as conn:
+        with conn.cursor() as cur:
+            old_id, _season_id = _seed_match(
+                cur,
+                home="Coventry City",
+                away="Chelsea",
+                played=False,
+                match_date=date(2026, 12, 26),
+            )
+            _seed_prediction(cur, old_id)
+            _seed_match(
+                cur,
+                home="Coventry City",
+                away="Chelsea",
+                played=False,
+                match_date=date(2026, 12, 27),
+            )
+            conn.commit()
+            cur.execute(
+                """
+                SELECT competition_id, season_id, home_team_id, away_team_id,
+                       p_away, p_draw, p_home
+                FROM matches AS m
+                JOIN predictions AS p ON p.match_id = m.id
+                WHERE m.id = %s
+                """,
+                (old_id,),
+            )
+            competition_id, season_id, home_id, away_id, p_away, p_draw, p_home = cur.fetchone()
+            incoming = CuratedMatch(
+                match_date=date(2026, 12, 27),
+                kickoff_time=None,
+                home_source_name="Coventry",
+                away_source_name="Chelsea",
+                home_canonical_name="Coventry City",
+                away_canonical_name="Chelsea",
+                home_goals=None,
+                away_goals=None,
+                result=None,
+                result_code=None,
+                is_played=False,
+                source_row_hash="fixture-reschedule",
+            )
+            kept_id, inserted = _upsert_match(
+                cur,
+                competition_id=competition_id,
+                season_id=season_id,
+                home_team_id=home_id,
+                away_team_id=away_id,
+                match=incoming,
+                source_file="epl-2026.json",
+            )
+            conn.commit()
+            assert kept_id == old_id
+            assert inserted is False
+            cur.execute(
+                """
+                SELECT count(*), min(id), max(id), min(match_date), max(match_date)
+                FROM matches
+                WHERE home_team_id = %s AND away_team_id = %s
+                """,
+                (home_id, away_id),
+            )
+            n, min_id, max_id, min_date, max_date = cur.fetchone()
+            assert n == 1
+            assert min_id == max_id == old_id
+            assert min_date == max_date == date(2026, 12, 27)
+            cur.execute(
+                "SELECT p_away, p_draw, p_home FROM predictions WHERE match_id = %s",
+                (old_id,),
+            )
+            assert cur.fetchone() == (p_away, p_draw, p_home)
+            assert (float(p_away), float(p_draw), float(p_home)) == (0.25, 0.25, 0.50)

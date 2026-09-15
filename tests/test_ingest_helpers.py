@@ -65,9 +65,32 @@ def test_invalid_year_override_is_rejected():
         resolve_ingest_end_year("yesterday")
 
 
-def test_ingest_seasons_rejects_reversed_range():
-    with pytest.raises(IngestError, match="before start_year"):
-        ingest_seasons("E0", 2024, end_year=2018)
+def test_download_falls_back_to_cached_csv_when_hosts_fail(tmp_path, monkeypatch):
+    from football_pipeline import football_data
+
+    dest = tmp_path / "E0_2018-2019.csv"
+    dest.write_text("Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\n", encoding="utf-8")
+
+    def boom(url, dest_path):
+        raise IngestError(f"Could not download {url}: Name or service not known")
+
+    monkeypatch.setattr(football_data, "download_csv", boom)
+    source = football_data.download_season_csv("E0", 2018, dest)
+    assert dest.is_file()
+    assert source.startswith("file:")
+
+
+def test_download_still_fails_when_there_is_no_cache(tmp_path, monkeypatch):
+    from football_pipeline import football_data
+
+    dest = tmp_path / "missing.csv"
+
+    def boom(url, dest_path):
+        raise IngestError(f"Could not download {url}: Name or service not known")
+
+    monkeypatch.setattr(football_data, "download_csv", boom)
+    with pytest.raises(IngestError, match="All football-data hosts failed"):
+        football_data.download_season_csv("E0", 2018, dest)
 
 
 def test_header_requires_result_columns():

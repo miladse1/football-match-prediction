@@ -152,4 +152,11 @@ def download_season_csv(competition_code: str, start_year: int, dest: Path) -> s
         except IngestError as exc:
             logger.warning("%s", exc)
             errors.append(str(exc))
+    if dest.is_file() and dest.stat().st_size > 0:
+        logger.warning(
+            "Using cached %s because all football-data hosts failed: %s",
+            dest,
+            " | ".join(errors),
+        )
+        return dest.as_uri()
     raise IngestError("All football-data hosts failed: " + " | ".join(errors))

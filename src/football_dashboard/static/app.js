@@ -1,15 +1,64 @@
 /* MatchLab dashboard.
-   Read-only client for the FastAPI endpoints. Renders stored probabilities
+   Read-only client for the FastAPI endpoints. Renders the stored probabilities
    exactly as the API returns them and never recomputes a number. */
 
 const view = document.getElementById("view");
-const seasonLabel = document.getElementById("season-label");
 const footMeta = document.getElementById("foot-meta");
 const PAGE_SIZE = 16;
 const DEFAULT_LEAGUE = "E0";
+const LEAGUE_KEY = "matchlab.league";
+
+/* ==========================================================================
+   League state
+
+   The URL is the source of truth so every page stays linkable to one league.
+   The last choice is also mirrored into localStorage, so opening a bare
+   /upcoming restores the league you were reading instead of silently
+   dropping back to the Premier League.
+   ========================================================================== */
+
+let catalog = { competitions: [], default: DEFAULT_LEAGUE, byCode: {} };
+
+function storedLeague() {
+  try {
+    return window.localStorage.getItem(LEAGUE_KEY);
+  } catch (error) {
+    return null; /* private mode, or storage blocked */
+  }
+}
+
+function rememberLeague(code) {
+  try {
+    window.localStorage.setItem(LEAGUE_KEY, code);
+  } catch (error) {
+    /* nothing to do: the URL still carries the league */
+  }
+}
+
+function knownLeague(code) {
+  if (!code) return null;
+  if (!catalog.competitions.length) return code;
+  return catalog.byCode[code] ? code : null;
+}
 
 function currentLeague() {
-  return new URLSearchParams(window.location.search).get("league") || DEFAULT_LEAGUE;
+  const fromUrl = knownLeague(new URLSearchParams(window.location.search).get("league"));
+  if (fromUrl) return fromUrl;
+  return knownLeague(storedLeague()) || catalog.default || DEFAULT_LEAGUE;
+}
+
+function currentSpec() {
+  return catalog.byCode[currentLeague()] || null;
+}
+
+/* Put the resolved league into the address bar without adding a history
+   entry, so a shared link always names its competition. */
+function pinLeagueToUrl() {
+  const league = currentLeague();
+  const url = new URL(window.location.href);
+  if (url.searchParams.get("league") === league) return;
+  url.searchParams.set("league", league);
+  window.history.replaceState({}, "", `${url.pathname}${url.search}`);
 }
 
 function withLeague(href, extra = {}) {
@@ -23,10 +72,12 @@ function withLeague(href, extra = {}) {
 }
 
 function leagueName(data) {
-  return (data && data.competition && data.competition.name) || "Premier League";
+  if (data && data.competition && data.competition.name) return data.competition.name;
+  const spec = currentSpec();
+  return spec ? spec.name : "Premier League";
 }
 
-/* ---------------------------------------------------------------- utils -- */
+/* ------------------------------------------------------------------ utils */
 
 function pathOf() {
   const path = window.location.pathname.replace(/\/$/, "");
@@ -59,17 +110,16 @@ function parseDate(dateStr, timeStr) {
 }
 
 function formatKickoff(dateStr, timeStr) {
-  const day = parseDate(dateStr, timeStr).toLocaleDateString("en-GB", {
+  const day = parseDate(dateStr, timeStr).toLocaleDateString(undefined, {
     weekday: "short",
     day: "numeric",
     month: "short",
-    year: "numeric",
   });
-  return timeStr ? `${day} · ${timeStr}` : day;
+  return timeStr ? `${day}, ${timeStr}` : day;
 }
 
 function formatDay(dateStr) {
-  return parseDate(dateStr, "12:00").toLocaleDateString("en-GB", {
+  return parseDate(dateStr, "12:00").toLocaleDateString(undefined, {
     weekday: "long",
     day: "numeric",
     month: "long",
@@ -77,8 +127,16 @@ function formatDay(dateStr) {
   });
 }
 
+function formatLongDay(dateStr) {
+  return parseDate(dateStr, "12:00").toLocaleDateString(undefined, {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+  });
+}
+
 function formatShortDate(dateStr) {
-  return parseDate(dateStr, "12:00").toLocaleDateString("en-GB", {
+  return parseDate(dateStr, "12:00").toLocaleDateString(undefined, {
     day: "numeric",
     month: "short",
     year: "2-digit",
@@ -86,8 +144,8 @@ function formatShortDate(dateStr) {
 }
 
 function formatStamp(iso) {
-  if (!iso) return "Unknown";
-  return new Date(iso).toLocaleString("en-GB", {
+  if (!iso) return "unknown";
+  return new Date(iso).toLocaleString(undefined, {
     day: "numeric",
     month: "short",
     year: "numeric",
@@ -96,13 +154,19 @@ function formatStamp(iso) {
   });
 }
 
+function formatCount(value) {
+  return Number(value ?? 0).toLocaleString();
+}
+
+const NONE = "-";
+
 function pct(value) {
-  if (value == null) return "—";
+  if (value == null) return NONE;
   return `${Math.round(value * 100)}%`;
 }
 
 function fmtPct(value) {
-  if (value == null) return "—";
+  if (value == null) return NONE;
   const p = value * 100;
   if (p >= 1) return `${p.toFixed(1)}%`;
   if (p > 0) return `${p.toFixed(2)}%`;
@@ -110,12 +174,8 @@ function fmtPct(value) {
 }
 
 function fmtNum(value, digits = 1) {
-  if (value == null) return "—";
+  if (value == null) return NONE;
   return Number(value).toFixed(digits);
-}
-
-function setSeason(label) {
-  seasonLabel.textContent = label;
 }
 
 function setFootMeta(model, extra) {
@@ -123,42 +183,9 @@ function setFootMeta(model, extra) {
     footMeta.textContent = "";
     return;
   }
-  const bits = [`${model.model_name} · ${model.feature_version}`];
+  const bits = [`${model.model_name} model, feature set ${model.feature_version}`];
   if (extra) bits.push(extra);
-  footMeta.textContent = bits.join(" · ");
-}
-
-function setNav() {
-  const current = pathOf();
-  document.querySelectorAll("[data-nav]").forEach((link) => {
-    const target = link.dataset.nav;
-    link.setAttribute("href", withLeague(target));
-    const active =
-      current === target ||
-      (target === "/upcoming" && current.startsWith("/upcoming/")) ||
-      (target === "/results" && current.startsWith("/results/"));
-    link.classList.toggle("active", active);
-    if (active) link.setAttribute("aria-current", "page");
-    else link.removeAttribute("aria-current");
-  });
-  const brand = document.querySelector(".brand");
-  if (brand) brand.setAttribute("href", withLeague("/"));
-  const league = currentLeague();
-  document.querySelectorAll("[data-league]").forEach((link) => {
-    const code = link.dataset.league;
-    link.classList.toggle("is-active", code === league);
-    link.setAttribute("href", `${current || "/"}?league=${code}`);
-  });
-  const active = document.querySelector(".nav a.active");
-  if (active) active.scrollIntoView({ block: "nearest", inline: "nearest" });
-}
-
-function matchDetailRoute() {
-  const upcoming = pathOf().match(/^\/upcoming\/(\d+)$/);
-  if (upcoming) return { kind: "upcoming", id: Number(upcoming[1]) };
-  const result = pathOf().match(/^\/results\/(\d+)$/);
-  if (result) return { kind: "result", id: Number(result[1]) };
-  return null;
+  footMeta.textContent = bits.join(". ");
 }
 
 async function fetchJson(url) {
@@ -176,19 +203,143 @@ async function fetchJson(url) {
   return response.json();
 }
 
-/* --------------------------------------------------------------- crests -- */
+/* ==========================================================================
+   Header: navigation and the league menu
+   ========================================================================== */
+
+const leagueButton = document.getElementById("league-button");
+const leagueMenu = document.getElementById("league-menu");
+const leaguePicker = document.getElementById("league-picker");
+
+function closeLeagueMenu() {
+  if (!leagueMenu || leagueMenu.hidden) return;
+  leagueMenu.hidden = true;
+  leagueButton.setAttribute("aria-expanded", "false");
+}
+
+function openLeagueMenu() {
+  if (!leagueMenu) return;
+  leagueMenu.hidden = false;
+  leagueButton.setAttribute("aria-expanded", "true");
+  const active = leagueMenu.querySelector(".league-option.is-active") || leagueMenu.querySelector(".league-option");
+  active?.focus();
+}
+
+leagueButton?.addEventListener("click", () => {
+  if (leagueMenu.hidden) openLeagueMenu();
+  else closeLeagueMenu();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || leagueMenu?.hidden) return;
+  closeLeagueMenu();
+  leagueButton?.focus();
+});
+
+document.addEventListener("pointerdown", (event) => {
+  if (leagueMenu?.hidden) return;
+  if (leaguePicker && !leaguePicker.contains(event.target)) closeLeagueMenu();
+});
+
+function paintLeaguePicker() {
+  const league = currentLeague();
+  const spec = currentSpec();
+  const markEl = document.getElementById("league-button-mark");
+  const nameEl = document.getElementById("league-button-name");
+  if (spec) {
+    if (markEl) markEl.textContent = spec.mark;
+    if (nameEl) nameEl.textContent = spec.name;
+    leagueButton?.setAttribute("aria-label", `League: ${spec.name}. Choose a different league`);
+  }
+
+  const options = document.getElementById("league-options");
+  if (!options || !catalog.competitions.length) return;
+
+  /* The menu keeps the current path, so switching league stays on the page
+     you were reading rather than bouncing you back to the overview. */
+  const here = pathOf();
+  const target = /^\/(upcoming|results)\/\d+$/.test(here) ? "/" : here;
+
+  options.innerHTML = catalog.competitions
+    .map((spec_) => {
+      const active = spec_.code === league;
+      return html`
+        <a
+          class="league-option ${active ? "is-active" : ""}"
+          role="menuitem"
+          data-link
+          data-league="${spec_.code}"
+          href="${target}?league=${spec_.code}"
+          ${active ? 'aria-current="true"' : ""}
+        >
+          <span class="mark" aria-hidden="true">${escapeHtml(spec_.mark)}</span>
+          <span>
+            ${escapeHtml(spec_.name)}
+            <span class="country">${escapeHtml(spec_.country)}</span>
+          </span>
+          ${active ? '<span class="tick" aria-hidden="true">✓</span>' : ""}
+        </a>
+      `;
+    })
+    .join("");
+}
+
+function setNav() {
+  const current = pathOf();
+  document.querySelectorAll("[data-nav]").forEach((link) => {
+    const target = link.dataset.nav;
+    link.setAttribute("href", withLeague(target));
+    const active =
+      current === target ||
+      (target === "/upcoming" && current.startsWith("/upcoming/")) ||
+      (target === "/results" && current.startsWith("/results/"));
+    link.classList.toggle("active", active);
+    if (active) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  });
+  const brand = document.querySelector(".brand");
+  if (brand) brand.setAttribute("href", withLeague("/"));
+  paintLeaguePicker();
+  document.querySelector(".nav a.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
+function matchDetailRoute() {
+  const upcoming = pathOf().match(/^\/upcoming\/(\d+)$/);
+  if (upcoming) return { kind: "upcoming", id: Number(upcoming[1]) };
+  const result = pathOf().match(/^\/results\/(\d+)$/);
+  if (result) return { kind: "result", id: Number(result[1]) };
+  return null;
+}
+
+/* ==========================================================================
+   Crests
+   ========================================================================== */
+
+const CREST_PX = { "crest-xs": 20, "crest-sm": 26, "crest-md": 40, "crest-lg": 64 };
 
 function crestHtml(team, crest, sizeClass = "crest-sm") {
   const badge = crest || {};
   const initials = escapeHtml(badge.initials || String(team || "?").slice(0, 3).toUpperCase());
   const color = escapeHtml(badge.color || "#3d4338");
   const ink = escapeHtml(badge.ink || "#f4f1e8");
-  const fallback = `<span class="crest-fallback" style="background:${color};color:${ink}">${initials}</span>`;
+  const size = CREST_PX[sizeClass] || 26;
+  /* The club name always sits next to the crest, so the initials badge is
+     decorative and must not be announced a second time. */
+  const fallback = `<span class="crest-fallback" aria-hidden="true" style="background:${color};color:${ink}">${initials}</span>`;
   if (!badge.crest_url) {
     return `<span class="crest-wrap ${sizeClass}">${fallback}</span>`;
   }
+  /* width/height are set so the crest reserves its box before it loads. */
   return html`<span class="crest-wrap ${sizeClass}"
-    >${fallback}<img class="crest" src="${escapeHtml(badge.crest_url)}" alt="" loading="lazy" /></span
+    >${fallback}<img
+      class="crest"
+      src="${escapeHtml(badge.crest_url)}"
+      width="${size}"
+      height="${size}"
+      alt=""
+      loading="lazy"
+      decoding="async"
+    /></span
   >`;
 }
 
@@ -205,124 +356,119 @@ function bindCrestFallbacks(root = document) {
   });
 }
 
-/* ---------------------------------------------- prediction strip (core) -- */
+/* ==========================================================================
+   Probability bar: the signature component
 
-/* The signature MatchLab component: three equal columns of team + percentage
-   above one segmented bar. Same markup at every size so the meaning of each
-   colour is identical across the whole product. */
-function probStrip(match, { large = false, showFlags = true } = {}) {
-  const predicted = match.predicted_outcome;
-  const actual = match.actual_outcome ?? null;
+   One geometry everywhere. Segment width is the probability, the filled
+   segment is the model's most likely outcome, and the colour of each third
+   means the same thing on every page in the product.
+   ========================================================================== */
 
-  const cols = [
-    { key: "home", label: match.home_team, value: match.p_home_pct, name: match.home_team },
+function probColumns(match) {
+  return [
+    { key: "home", label: "Home", value: match.p_home_pct, name: match.home_team },
     { key: "draw", label: "Draw", value: match.p_draw_pct, name: "Draw" },
-    { key: "away", label: match.away_team, value: match.p_away_pct, name: match.away_team },
+    { key: "away", label: "Away", value: match.p_away_pct, name: match.away_team },
   ];
+}
 
-  const head = cols
+function probBar(match, { large = false } = {}) {
+  const pick = match.predicted_outcome;
+  const cols = probColumns(match);
+  /* Below this share the number cannot be read inside its own segment, so it
+     moves down to the label row instead of being clipped. */
+  const tightAt = large ? 5 : 9;
+
+  const segs = cols
     .map((col) => {
-      const isPick = predicted === col.name;
-      const isActual = actual != null && actual === col.name;
-      const classes = [
-        "prob-col",
-        `is-${col.key}`,
-        isPick ? "is-pick" : "",
-        isActual ? "is-actual" : "",
-      ]
+      const tight = col.value < tightAt;
+      const classes = ["seg", col.key, pick === col.name ? "is-pick" : "", tight ? "is-tight" : ""]
         .filter(Boolean)
         .join(" ");
-      let flag = "";
-      if (showFlags && isPick && isActual) flag = `<span class="prob-flag">Pick · Actual</span>`;
-      else if (showFlags && isActual) flag = `<span class="prob-flag">Actual</span>`;
-      else if (showFlags && isPick) flag = `<span class="prob-flag">Pick</span>`;
-      return html`
-        <div class="${classes}">
-          <span class="prob-team">${escapeHtml(col.label)}</span>
-          <span class="prob-pct">${col.value}%</span>
-          ${flag}
-        </div>
-      `;
+      return `<span class="${classes}" style="flex:${Math.max(col.value, 1)} 1 0">${tight ? "" : `${col.value}%`}</span>`;
     })
     .join("");
 
-  const seg = (key, value, name) =>
-    `<span class="seg ${key} ${predicted === name ? "is-pick" : ""}" style="width:${value}%"></span>`;
+  const legend = cols
+    .map((col) => `<span>${col.label}${col.value < tightAt ? ` ${col.value}%` : ""}</span>`)
+    .join("");
 
-  const aria = `Home ${match.p_home_pct} percent, draw ${match.p_draw_pct} percent, away ${match.p_away_pct} percent`;
+  const aria = `Home win ${match.p_home_pct} percent, draw ${match.p_draw_pct} percent, away win ${match.p_away_pct} percent`;
 
   return html`
-    <div class="probstrip ${large ? "probstrip-lg" : ""}">
-      <div class="probstrip-head">${head}</div>
-      <div class="probbar" role="img" aria-label="${escapeHtml(aria)}">
-        ${seg("home", match.p_home_pct, match.home_team)}${seg("draw", match.p_draw_pct, "Draw")}${seg(
-          "away",
-          match.p_away_pct,
-          match.away_team,
-        )}
-      </div>
+    <div class="probs ${large ? "probs-lg" : ""}">
+      <div class="probbar" role="img" aria-label="${escapeHtml(aria)}">${segs}</div>
+      <div class="problegend" aria-hidden="true">${legend}</div>
     </div>
   `;
 }
 
-function pickDotClass(match) {
-  if (match.predicted_outcome === "Draw") return "draw";
-  if (match.predicted_outcome === match.home_team) return "home";
-  return "away";
-}
+/* ==========================================================================
+   Match cards
 
-/* ---------------------------------------------------------- match cards -- */
+   Teams are stacked vertically, so a full club name never has to be
+   truncated and each name appears exactly once on the card.
+   ========================================================================== */
 
 function noteTag(note) {
   if (!note) return "";
-  const cls = note === "Draw watch" ? "tag-watch" : "tag-close";
-  return `<span class="tag ${cls}">${escapeHtml(note)}</span>`;
+  return `<span class="tag tag-watch">${escapeHtml(note)}</span>`;
 }
 
 function verdictBadge(correct) {
   if (correct == null) return "";
   return correct
-    ? `<span class="verdict verdict-ok"><span class="mark" aria-hidden="true">✓</span>Correct</span>`
-    : `<span class="verdict verdict-miss"><span class="mark" aria-hidden="true">✕</span>Missed</span>`;
+    ? `<span class="verdict verdict-ok"><span aria-hidden="true">✓</span>Correct</span>`
+    : `<span class="verdict verdict-miss"><span aria-hidden="true">✕</span>Missed</span>`;
 }
 
-function matchCard(item, { settled = false, showDate = false } = {}) {
+function teamRow(name, crest, { goals = null, down = false, pick = false } = {}) {
+  const classes = ["team-row", down ? "is-down" : "", pick ? "is-pick" : ""].filter(Boolean).join(" ");
+  const right = goals == null ? "" : `<span class="goals">${goals}</span>`;
+  return html`
+    <div class="${classes}">
+      ${crestHtml(name, crest, "crest-sm")}
+      <span class="team-name">${escapeHtml(name)}</span>
+      ${right}
+    </div>
+  `;
+}
+
+function matchCard(item, { settled = false, showDate = true } = {}) {
   const href = item.match_id
     ? withLeague(`${settled ? "/results" : "/upcoming"}/${item.match_id}`)
     : "";
+  const label = settled
+    ? `${item.home_team} ${item.home_goals}-${item.away_goals} ${item.away_team}, match detail`
+    : `${item.home_team} versus ${item.away_team}, match detail`;
   const link = href
-    ? `<a class="stretch-link" data-link href="${href}" aria-label="${escapeHtml(
-        `${item.home_team} versus ${item.away_team}, match detail`,
-      )}"></a>`
+    ? `<a class="stretch-link" data-link href="${href}" aria-label="${escapeHtml(label)}"></a>`
     : "";
 
-  const timeText = showDate
-    ? formatKickoff(item.kickoff_date, item.kickoff_time)
-    : item.kickoff_time || formatShortDate(item.kickoff_date);
-
-  const center = settled
-    ? `<span class="match-score">${item.home_goals}<span class="muted">–</span>${item.away_goals}</span>`
-    : `<span class="match-vs">vs</span>`;
+  const timeText = settled
+    ? showDate
+      ? formatKickoff(item.kickoff_date, item.kickoff_time)
+      : item.kickoff_time || formatShortDate(item.kickoff_date)
+    : showDate
+      ? formatKickoff(item.kickoff_date, item.kickoff_time)
+      : item.kickoff_time || formatShortDate(item.kickoff_date);
 
   const topRight = settled ? verdictBadge(item.correct) : noteTag(item.note);
 
-  const body = item.has_prediction
-    ? probStrip(item, { showFlags: settled })
-    : `<p class="no-pred">No stored pre-match prediction for this fixture.</p>`;
+  const homeWon = settled && item.home_goals > item.away_goals;
+  const awayWon = settled && item.away_goals > item.home_goals;
+  const pickHome = !settled && item.has_prediction && item.predicted_outcome === item.home_team;
+  const pickAway = !settled && item.has_prediction && item.predicted_outcome === item.away_team;
 
-  const foot = item.has_prediction
-    ? html`
-        <div class="match-card-foot">
-          <span class="pick-line">
-            <i class="pick-dot ${pickDotClass(item)}" aria-hidden="true"></i>
-            Pick <b>${escapeHtml(item.predicted_outcome)}</b>
-          </span>
-          ${settled && item.actual_outcome
-            ? `<span>Result <b style="color:var(--ink)">${escapeHtml(item.actual_outcome)}</b></span>`
-            : ""}
-        </div>
-      `
-    : "";
+  const teams = settled
+    ? teamRow(item.home_team, item.home_crest, { goals: item.home_goals, down: awayWon }) +
+      teamRow(item.away_team, item.away_crest, { goals: item.away_goals, down: homeWon })
+    : teamRow(item.home_team, item.home_crest, { pick: pickHome }) +
+      teamRow(item.away_team, item.away_crest, { pick: pickAway });
+
+  const body = item.has_prediction
+    ? probBar(item)
+    : `<p class="no-pred">No prediction was stored before this match.</p>`;
 
   return html`
     <article class="match-card ${href ? "is-link" : ""}">
@@ -331,25 +477,15 @@ function matchCard(item, { settled = false, showDate = false } = {}) {
         <time class="match-time" datetime="${escapeHtml(item.kickoff_date)}">${escapeHtml(timeText)}</time>
         ${topRight}
       </div>
-      <div class="match-teams">
-        <div class="team-line home">
-          ${crestHtml(item.home_team, item.home_crest, "crest-sm")}
-          <span class="team-name">${escapeHtml(item.home_team)}</span>
-        </div>
-        <div class="match-center">${center}</div>
-        <div class="team-line away">
-          ${crestHtml(item.away_team, item.away_crest, "crest-sm")}
-          <span class="team-name">${escapeHtml(item.away_team)}</span>
-        </div>
-      </div>
-      ${body} ${foot}
+      <div class="teams">${teams}</div>
+      ${body}
     </article>
   `;
 }
 
-function renderGroups(groups, { settled = false } = {}) {
+function renderGroups(groups, { settled = false, emptyMessage = "" } = {}) {
   if (!groups.length) {
-    return `<p class="empty">No matches match these filters. Try clearing them.</p>`;
+    return `<p class="empty">${escapeHtml(emptyMessage)}</p>`;
   }
   return groups
     .map(
@@ -357,7 +493,7 @@ function renderGroups(groups, { settled = false } = {}) {
         <section class="daygroup">
           <div class="day-head"><h2>${formatDay(group.date)}</h2></div>
           <div class="match-grid">
-            ${group.fixtures.map((item) => matchCard(item, { settled })).join("")}
+            ${group.fixtures.map((item) => matchCard(item, { settled, showDate: false })).join("")}
           </div>
         </section>
       `,
@@ -365,24 +501,24 @@ function renderGroups(groups, { settled = false } = {}) {
     .join("");
 }
 
-/* ------------------------------------------------------ filters + pager -- */
+/* ------------------------------------------------------- filters and pager */
 
 function filters(values) {
   return html`
     <form class="filters" id="filter-form">
       <label>
         Team
-        <select name="team" id="team-filter">
+        <select name="team" id="team-filter" autocomplete="off">
           <option value="">All teams</option>
         </select>
       </label>
       <label>
         From
-        <input name="date_from" id="date-from" type="date" value="${escapeHtml(values.date_from || "")}" />
+        <input name="date_from" id="date-from" type="date" autocomplete="off" value="${escapeHtml(values.date_from || "")}" />
       </label>
       <label>
         To
-        <input name="date_to" id="date-to" type="date" value="${escapeHtml(values.date_to || "")}" />
+        <input name="date_to" id="date-to" type="date" autocomplete="off" value="${escapeHtml(values.date_to || "")}" />
       </label>
       <div class="filter-actions">
         <button type="submit" class="btn btn-primary">Apply</button>
@@ -423,39 +559,50 @@ function bindFilters(basePath) {
 }
 
 function pager(data, buildHref) {
+  const total = `${formatCount(data.total)} ${data.total === 1 ? "match" : "matches"}`;
   if (data.pages <= 1) {
-    return `<div class="pager"><span>${data.total} ${data.total === 1 ? "match" : "matches"}</span></div>`;
+    return `<div class="pager"><span>${total}</span></div>`;
   }
   const prev =
-    data.page > 1 ? `<a class="btn" data-link href="${buildHref(data.page - 1)}">← Previous</a>` : "";
+    data.page > 1 ? `<a class="btn pill-sm" data-link href="${buildHref(data.page - 1)}">Previous</a>` : "";
   const next =
-    data.page < data.pages ? `<a class="btn" data-link href="${buildHref(data.page + 1)}">Next →</a>` : "";
+    data.page < data.pages ? `<a class="btn pill-sm" data-link href="${buildHref(data.page + 1)}">Next</a>` : "";
   return html`
     <div class="pager">
-      <span>Page ${data.page} of ${data.pages} · ${data.total} matches</span>
+      <span>Page ${data.page} of ${data.pages}, ${total}</span>
       <div class="pager-actions">${prev}${next}</div>
     </div>
   `;
 }
 
-/* -------------------------------------------------------------- overview -- */
+/* ------------------------------------------------------------ page heading */
 
-function accuracyMeter(live) {
-  const value = live.n ? Math.round(live.accuracy * 100) : 0;
+function pageHead(season, title, lede, aside = "") {
   return html`
-    <div class="meter">
-      <div class="meter-ring" style="--pct:${value}" data-label="${live.n ? `${value}%` : "—"}"></div>
-      <div class="meter-body">
-        <p class="kpi-label">Live accuracy</p>
-        <p class="help">
-          ${live.n
-            ? `${live.correct} of ${live.n} settled predictions correct · log loss ${live.log_loss.toFixed(3)}`
-            : "No settled live predictions yet this season."}
-        </p>
+    <div class="page-head">
+      <div class="page-head-main">
+        ${season ? `<p class="season-tag"><span class="dot" aria-hidden="true"></span>${escapeHtml(season)}</p>` : ""}
+        <h1>${escapeHtml(title)}</h1>
+        ${lede ? `<p class="lede">${lede}</p>` : ""}
       </div>
+      ${aside}
     </div>
   `;
 }
+
+function statCell(label, value, foot, { accent = false, small = false } = {}) {
+  return html`
+    <div class="stat ${accent ? "stat-accent" : ""}">
+      <span class="stat-label">${escapeHtml(label)}</span>
+      <span class="stat-value ${small ? "sm" : ""}">${value}</span>
+      <span class="stat-foot">${escapeHtml(foot)}</span>
+    </div>
+  `;
+}
+
+/* ==========================================================================
+   Overview
+   ========================================================================== */
 
 function titleRacePanel(forecast) {
   if (!forecast) return "";
@@ -479,104 +626,78 @@ function titleRacePanel(forecast) {
     <article class="panel">
       <div class="section-head" style="margin-bottom:var(--sp-3)">
         <h2>Title race</h2>
-        <a class="pill" data-link href="${withLeague("/forecast")}">Full forecast</a>
+        <a class="pill pill-sm" data-link href="${withLeague("/forecast")}">Full table</a>
       </div>
-      <p class="help" style="margin-bottom:var(--sp-3)">
-        Chance of finishing first across ${forecast.n_sims.toLocaleString("en-GB")} simulated seasons.
-      </p>
-      <div class="race-list">${rows}</div>
+      <p class="help">Chance of finishing first across ${formatCount(forecast.n_sims)} simulated seasons.</p>
+      <div class="race-list" style="margin-top:var(--sp-3)">${rows}</div>
     </article>
   `;
 }
 
 async function renderOverview() {
-  const data = await fetchJson(`/api/overview${qs({ league: currentLeague() })}`);
-  const forecast = await fetchJson(`/api/forecast${qs({ league: currentLeague() })}`).catch(() => null);
+  const league = currentLeague();
+  const data = await fetchJson(`/api/overview${qs({ league })}`);
+  const forecast = await fetchJson(`/api/forecast${qs({ league })}`).catch(() => null);
 
-  setSeason(`${leagueName(data)} · ${data.live_season}`);
   setFootMeta(data.model, `Predictions updated ${formatStamp(data.predictions_updated_at)}`);
 
   const live = data.live_scorecard;
   const latest = data.latest_completed_match;
+  const name = leagueName(data);
+
+  const latestPanel = latest
+    ? html`
+        <div class="latest">
+          <div class="latest-row ${latest.away_goals > latest.home_goals ? "is-down" : ""}">
+            ${crestHtml(latest.home_team, latest.home_crest, "crest-sm")}
+            <span>${escapeHtml(latest.home_team)}</span>
+            <span class="goals">${latest.home_goals}</span>
+          </div>
+          <div class="latest-row ${latest.home_goals > latest.away_goals ? "is-down" : ""}">
+            ${crestHtml(latest.away_team, latest.away_crest, "crest-sm")}
+            <span>${escapeHtml(latest.away_team)}</span>
+            <span class="goals">${latest.away_goals}</span>
+          </div>
+          <p class="help">${formatKickoff(latest.kickoff_date, latest.kickoff_time)}</p>
+        </div>
+      `
+    : `<p class="help">No completed matches yet this season.</p>`;
 
   view.innerHTML = html`
-    <div class="page-head">
-      <div class="page-head-main">
-        <p class="eyebrow">Season ${escapeHtml(data.live_season)}</p>
-        <h1>${escapeHtml(leagueName(data))} predictions</h1>
-        <p class="lede">
-          Home, Draw and Away probabilities for every remaining fixture, frozen the moment a match
-          kicks off so results are always judged against what was predicted beforehand.
-        </p>
-      </div>
-    </div>
+    ${pageHead(
+      `${name}, ${data.live_season}`,
+      `${name} predictions`,
+      "Home, Draw and Away probabilities for every remaining fixture. Each one is frozen before kickoff, so results are always judged against what was predicted beforehand.",
+    )}
 
-    <section class="kpi-grid">
-      <article class="kpi kpi-accent">
-        <span class="kpi-label">Live accuracy</span>
-        <span class="kpi-value">${live.n ? pct(live.accuracy) : "—"}</span>
-        <span class="kpi-foot">${live.n ? `${live.correct} of ${live.n} correct` : "Awaiting results"}</span>
-      </article>
-      <article class="kpi">
-        <span class="kpi-label">Log loss</span>
-        <span class="kpi-value">${live.n ? live.log_loss.toFixed(3) : "—"}</span>
-        <span class="kpi-foot">Lower is better</span>
-      </article>
-      <article class="kpi">
-        <span class="kpi-label">Fixtures ahead</span>
-        <span class="kpi-value">${data.n_upcoming}</span>
-        <span class="kpi-foot">All carry a stored prediction</span>
-      </article>
-      <article class="kpi">
-        <span class="kpi-label">Matches settled</span>
-        <span class="kpi-value">${data.n_settled}</span>
-        <span class="kpi-foot">Played so far in ${escapeHtml(data.live_season)}</span>
-      </article>
+    <section class="statbar" aria-label="Season at a glance">
+      ${statCell("Live accuracy", live.n ? pct(live.accuracy) : NONE, live.n ? `${live.correct} of ${live.n} correct` : "Awaiting results", { accent: true })}
+      ${statCell("Matches played", formatCount(data.n_settled), `So far in ${data.live_season}`)}
+      ${statCell("Fixtures ahead", formatCount(data.n_upcoming), "Every one has a prediction")}
+      ${statCell("Log loss", live.n ? live.log_loss.toFixed(3) : NONE, "Lower is better")}
     </section>
 
     <div class="overview-cols">
       <div>
         <div class="section-head">
           <h2>Next fixtures</h2>
-          <a class="pill" data-link href="${withLeague("/upcoming")}">All fixtures →</a>
+          <a class="pill pill-sm" data-link href="${withLeague("/upcoming")}">All fixtures</a>
         </div>
         <div class="match-grid">
           ${data.next_upcoming.length
-            ? data.next_upcoming.slice(0, 6).map((item) => matchCard(item, { showDate: true })).join("")
+            ? data.next_upcoming.slice(0, 6).map((item) => matchCard(item)).join("")
             : `<p class="empty">No upcoming fixtures with a stored prediction.</p>`}
         </div>
       </div>
 
       <div class="side-stack">
-        <article class="panel">${accuracyMeter(live)}</article>
-
         <article class="panel">
           <div class="section-head" style="margin-bottom:var(--sp-3)">
             <h2>Latest result</h2>
-            <a class="pill" data-link href="${withLeague("/results")}">All results</a>
+            <a class="pill pill-sm" data-link href="${withLeague("/results")}">All results</a>
           </div>
-          ${latest
-            ? html`
-                <div class="latest-result">
-                  <div class="latest-teams">
-                    <div class="latest-club">
-                      ${crestHtml(latest.home_team, latest.home_crest, "crest-md")}
-                      <span>${escapeHtml(latest.home_team)}</span>
-                    </div>
-                    <span class="latest-score">${latest.home_goals}–${latest.away_goals}</span>
-                    <div class="latest-club">
-                      ${crestHtml(latest.away_team, latest.away_crest, "crest-md")}
-                      <span>${escapeHtml(latest.away_team)}</span>
-                    </div>
-                  </div>
-                  <p class="help" style="text-align:center">
-                    ${formatKickoff(latest.kickoff_date, latest.kickoff_time)}
-                  </p>
-                </div>
-              `
-            : `<p class="help">No completed matches yet this season.</p>`}
+          ${latestPanel}
         </article>
-
         ${titleRacePanel(forecast)}
       </div>
     </div>
@@ -584,7 +705,9 @@ async function renderOverview() {
   bindCrestFallbacks(view);
 }
 
-/* ------------------------------------------------------------- fixtures -- */
+/* ==========================================================================
+   Fixtures and results
+   ========================================================================== */
 
 function listQuery() {
   const params = new URLSearchParams(window.location.search);
@@ -598,26 +721,30 @@ function listQuery() {
   };
 }
 
+/* A filtered list that finds nothing and a season that has not started are
+   different situations, so they do not share a message. */
+function emptyListMessage(query, nothingYet) {
+  const filtered = Boolean(query.team || query.date_from || query.date_to);
+  return filtered ? "No matches match these filters. Clear them to see everything again." : nothingYet;
+}
+
 async function renderUpcoming() {
   const query = listQuery();
   const data = await fetchJson(`/api/upcoming${qs(query)}`);
-  setSeason(`${leagueName(data)} · ${data.live_season}`);
   setFootMeta(data.model);
 
   const hrefFor = (page) =>
     `/upcoming${qs({ league: query.league, team: query.team, date_from: query.date_from, date_to: query.date_to, page })}`;
 
   view.innerHTML = html`
-    <div class="page-head">
-      <div class="page-head-main">
-        <p class="eyebrow">Season ${escapeHtml(data.live_season)}</p>
-        <h1>Fixtures</h1>
-        <p class="lede">
-          Every unplayed match with its pre-match probabilities. ${data.total} fixtures remaining.
-        </p>
-      </div>
-    </div>
-    ${filters(query)} ${renderGroups(data.groups)} ${pager(data, hrefFor)}
+    ${pageHead(
+      `${leagueName(data)}, ${data.live_season}`,
+      "Fixtures",
+      `Every unplayed match with the probabilities recorded for it. ${formatCount(data.total)} to come.`,
+    )}
+    ${filters(query)}
+    ${renderGroups(data.groups, { emptyMessage: emptyListMessage(query, "No fixtures are scheduled with a stored prediction yet.") })}
+    ${pager(data, hrefFor)}
   `;
   fillTeams(data.teams, query.team);
   bindFilters("/upcoming");
@@ -627,40 +754,42 @@ async function renderUpcoming() {
 async function renderResults() {
   const query = listQuery();
   const data = await fetchJson(`/api/results${qs(query)}`);
-  setSeason(`${leagueName(data)} · ${data.live_season}`);
   setFootMeta(data.model);
 
   const hrefFor = (page) =>
     `/results${qs({ league: query.league, team: query.team, date_from: query.date_from, date_to: query.date_to, page })}`;
 
   view.innerHTML = html`
-    <div class="page-head">
-      <div class="page-head-main">
-        <p class="eyebrow">Season ${escapeHtml(data.live_season)}</p>
-        <h1>Results</h1>
-        <p class="lede">
-          Completed matches shown against the probabilities stored before kickoff. Those numbers are
-          never rewritten once a result is known.
-        </p>
-      </div>
-    </div>
-    ${filters(query)} ${renderGroups(data.groups, { settled: true })} ${pager(data, hrefFor)}
+    ${pageHead(
+      `${leagueName(data)}, ${data.live_season}`,
+      "Results",
+      "Completed matches shown against the probabilities that were stored before kickoff. Those numbers are never rewritten once the result is known.",
+    )}
+    ${filters(query)}
+    ${renderGroups(data.groups, {
+      settled: true,
+      emptyMessage: emptyListMessage(query, "No matches have been played yet this season."),
+    })}
+    ${pager(data, hrefFor)}
   `;
   fillTeams(data.teams, query.team);
   bindFilters("/results");
   bindCrestFallbacks(view);
 }
 
-/* ---------------------------------------------------------- performance -- */
+/* ==========================================================================
+   Accuracy
 
-/* The bar encodes the success RATE, and the sample size is shown as text.
-   The previous version sized the bar by sample size, which made a 0% draw
-   record render as an almost full bar. */
+   Written for someone who follows football, not for someone reading a model
+   report. The bar length is the success rate, and the sample size sits next
+   to it as plain text.
+   ========================================================================== */
+
 function rateRows(slice, emptyLabel) {
   const names = [
-    ["home", "Home"],
+    ["home", "Home win"],
     ["draw", "Draw"],
-    ["away", "Away"],
+    ["away", "Away win"],
   ];
   return names
     .map(([key, label]) => {
@@ -671,7 +800,7 @@ function rateRows(slice, emptyLabel) {
           <span class="rate-name">${label}</span>
           <div class="rate-track"><span class="${key}" style="width:${width}%"></span></div>
           <span class="rate-value">
-            ${row.n ? pct(row.rate) : "—"}<small>${row.n ? `${row.correct}/${row.n}` : emptyLabel}</small>
+            ${row.n ? pct(row.rate) : NONE}<small>${row.n ? `${row.correct} of ${row.n}` : emptyLabel}</small>
           </span>
         </div>
       `;
@@ -680,143 +809,142 @@ function rateRows(slice, emptyLabel) {
 }
 
 async function renderPerformance() {
-  const data = await fetchJson(`/api/performance${qs({ league: currentLeague() })}`);
-  const recent = await fetchJson(
-    `/api/results${qs({ league: currentLeague(), page: "1", page_size: "20" })}`,
-  ).catch(() => null);
+  const league = currentLeague();
+  const data = await fetchJson(`/api/performance${qs({ league })}`);
+  const recent = await fetchJson(`/api/results${qs({ league, page: "1", page_size: "20" })}`).catch(() => null);
   const live = data.live_scorecard;
-  setSeason(`${leagueName(data)} · ${data.live_season}`);
   setFootMeta(data.model);
 
   const settled = recent
     ? recent.groups.flatMap((group) => group.fixtures).filter((item) => item.has_prediction)
     : [];
 
-  const streak = settled
-    .slice(0, 20)
+  const formRows = settled
+    .slice(0, 10)
     .map(
       (item) => html`
-        <a
-          class="streak-chip ${item.correct ? "ok" : "miss"}"
-          data-link
-          href="${withLeague(`/results/${item.match_id}`)}"
-          title="${escapeHtml(
-            `${item.home_team} ${item.home_goals}–${item.away_goals} ${item.away_team} · picked ${item.predicted_outcome}`,
-          )}"
-          >${item.correct ? "✓" : "✕"}</a
-        >
+        <a class="form-row" data-link href="${withLeague(`/results/${item.match_id}`)}">
+          <span class="form-mark ${item.correct ? "ok" : "miss"}" aria-hidden="true">${item.correct ? "✓" : "✕"}</span>
+          <span class="form-teams">
+            ${escapeHtml(item.home_team)} v ${escapeHtml(item.away_team)}
+            <span class="vh">${item.correct ? "predicted correctly" : "prediction missed"}</span>
+          </span>
+          <span class="form-score">${item.home_goals}-${item.away_goals}</span>
+          <span class="form-pick">picked ${escapeHtml(item.predicted_outcome)}</span>
+        </a>
       `,
     )
     .join("");
 
   view.innerHTML = html`
-    <div class="page-head">
-      <div class="page-head-main">
-        <p class="eyebrow">Season ${escapeHtml(data.live_season)}</p>
-        <h1>Performance</h1>
-        <p class="lede">
-          How the frozen pre-match predictions have actually performed this season. Walk-forward
-          selection and the untouched holdout test are on the model page.
-        </p>
-      </div>
-      <a class="pill" data-link href="${withLeague("/about")}">How the model was chosen →</a>
-    </div>
+    ${pageHead(
+      `${leagueName(data)}, ${data.live_season}`,
+      "Accuracy",
+      "How the predictions have actually held up this season, judged only against probabilities that were stored before kickoff.",
+      `<a class="pill" data-link href="${withLeague("/about")}">How the model is built</a>`,
+    )}
 
-    <section class="kpi-grid">
-      <article class="kpi kpi-accent">
-        <span class="kpi-label">Accuracy</span>
-        <span class="kpi-value">${live.n ? pct(live.accuracy) : "—"}</span>
-        <span class="kpi-foot">Top pick matched the result</span>
-      </article>
-      <article class="kpi">
-        <span class="kpi-label">Log loss</span>
-        <span class="kpi-value">${live.n ? live.log_loss.toFixed(3) : "—"}</span>
-        <span class="kpi-foot">Scores the probability, not the pick</span>
-      </article>
-      <article class="kpi">
-        <span class="kpi-label">Matches judged</span>
-        <span class="kpi-value">${live.n}</span>
-        <span class="kpi-foot">Settled with a stored prediction</span>
-      </article>
-      <article class="kpi">
-        <span class="kpi-label">Correct picks</span>
-        <span class="kpi-value">${live.correct || 0}</span>
-        <span class="kpi-foot">Out of ${live.n || 0}</span>
-      </article>
+    <section class="statbar" aria-label="Accuracy at a glance">
+      ${statCell("Correct calls", live.n ? pct(live.accuracy) : NONE, live.n ? `${live.correct} of ${live.n} matches` : "Awaiting results", { accent: true })}
+      ${statCell("Matches judged", formatCount(live.n), "Played, with a stored prediction")}
+      ${statCell("Best on", bestSlice(live), "Result type called most often")}
+      ${statCell("Log loss", live.n ? live.log_loss.toFixed(3) : NONE, "Scores the odds, not just the pick")}
     </section>
 
-    ${settled.length
-      ? html`
-          <article class="panel section">
-            <h2>Recent form</h2>
-            <p class="help">Most recent settled matches, newest first. Select one to open it.</p>
-            <div class="streak" style="margin-top:var(--sp-4)">${streak}</div>
-          </article>
-        `
-      : ""}
+    <div class="overview-cols">
+      <div>
+        ${settled.length
+          ? html`
+              <div class="section-head">
+                <h2>Recent matches</h2>
+                <a class="pill pill-sm" data-link href="${withLeague("/results")}">All results</a>
+              </div>
+              <div class="panel" style="padding:var(--sp-3)">
+                <div class="formlist">${formRows}</div>
+              </div>
+            `
+          : `<p class="empty">No results to judge yet this season.</p>`}
+      </div>
 
-    <div class="detail-cols">
-      <article class="panel">
-        <h2>Accuracy by actual result</h2>
-        <p class="help">
-          When a match really ended Home, Draw or Away, how often the top pick had said so.
-        </p>
-        ${live.n
-          ? `<div class="rate-list" style="margin-top:var(--sp-4)">${rateRows(live.by_actual, "none yet")}</div>`
-          : `<p class="empty">No settled live predictions yet.</p>`}
-      </article>
-      <article class="panel">
-        <h2>Accuracy by predicted class</h2>
-        <p class="help">
-          When the model's most likely outcome was this class, how often it turned out right.
-        </p>
-        ${live.n
-          ? `<div class="rate-list" style="margin-top:var(--sp-4)">${rateRows(
-              live.by_predicted,
-              "never picked",
-            )}</div>`
-          : `<p class="empty">No settled live predictions yet.</p>`}
-      </article>
+      <div class="side-stack">
+        <article class="panel">
+          <h2>When a match ended this way</h2>
+          <p class="help">Of the matches that really finished as a home win, a draw or an away win, how many the model had called.</p>
+          ${live.n
+            ? `<div class="rate-list">${rateRows(live.by_actual, "none yet")}</div>`
+            : `<p class="empty">Nothing settled yet.</p>`}
+        </article>
+        <article class="panel">
+          <h2>When the model called it</h2>
+          <p class="help">Of the matches where this was the most likely outcome, how many turned out that way.</p>
+          ${live.n
+            ? `<div class="rate-list">${rateRows(live.by_predicted, "never called")}</div>`
+            : `<p class="empty">Nothing settled yet.</p>`}
+        </article>
+      </div>
     </div>
   `;
   bindCrestFallbacks(view);
 }
 
-/* ------------------------------------------------------------- forecast -- */
+/* The strongest of the three outcome classes, by hit rate on a non-empty
+   sample. Used for a plain-language headline stat. */
+function bestSlice(live) {
+  if (!live.n) return NONE;
+  const labels = { home: "Home wins", draw: "Draws", away: "Away wins" };
+  let best = null;
+  for (const key of ["home", "draw", "away"]) {
+    const row = live.by_actual[key];
+    if (!row || !row.n || row.rate == null) continue;
+    if (!best || row.rate > best.rate) best = { key, rate: row.rate };
+  }
+  return best ? labels[best.key] : NONE;
+}
 
-let forecastState = { rows: [], sort: null, dir: "desc" };
+/* ==========================================================================
+   Season forecast
+   ========================================================================== */
+
+let forecastState = { rows: [], sort: null, dir: "desc", meta: null };
 
 const FORECAST_COLUMNS = [
-  { key: "pos", label: "#", sortable: false },
+  { key: "projected_rank", label: "#", sortable: false },
   { key: "team", label: "Club", sortable: true, type: "text" },
   { key: "current_played", label: "Pld", sortable: true },
   { key: "current_points", label: "Pts", sortable: true },
+  { key: "expected_points", label: "Proj. pts", sortable: true },
   { key: "title_prob", label: "Title", sortable: true },
   { key: "ucl_prob", label: "UCL", sortable: true },
   { key: "europe_prob", label: "Europe", sortable: true },
   { key: "relegation_prob", label: "Relegation", sortable: true },
-  { key: "expected_points", label: "Exp. pts", sortable: true },
-  { key: "expected_position", label: "Exp. pos", sortable: true },
 ];
 
-function forecastRow(row, index) {
-  const zone =
-    row.title_prob >= 0.05
-      ? "zone-title"
-      : row.ucl_prob >= 0.5 || row.top4_prob >= 0.5
-        ? "zone-ucl"
-        : row.relegation_prob >= 0.5
-          ? "zone-rel"
-          : "";
-  const bar = (kind, value) => html`
-    <span class="databar ${kind} ${value <= 0 ? "is-zero" : ""}">
-      <span class="fill" style="--w:${Math.min(100, Math.round(value * 100))}%"></span>
+/* Zones come from the competition payload, so an 18-club league with three
+   Champions League places marks exactly those rows and no others. */
+function zoneFor(rank, meta) {
+  if (!meta) return "";
+  if (rank <= meta.ucl_places) return "ucl";
+  if (rank < meta.europe_places) return "europa";
+  if (rank <= meta.europe_places) return "conference";
+  if (rank > meta.n_teams - meta.relegation_places) return "releg";
+  return "";
+}
+
+function databar(kind, value) {
+  const zero = !value || value <= 0;
+  return html`
+    <span class="databar ${kind} ${zero ? "is-zero" : ""}">
+      ${zero ? "" : `<span class="fill" style="--w:${Math.min(100, Math.round(value * 100))}%"></span>`}
       <span class="v">${fmtPct(value)}</span>
     </span>
   `;
+}
+
+function forecastRow(row) {
+  const zone = zoneFor(row.projected_rank, forecastState.meta);
   return html`
-    <tr class="${zone}">
-      <td class="col-pos">${index + 1}</td>
+    <tr ${zone ? `data-zone="${zone}"` : ""}>
+      <td class="col-pos">${row.projected_rank}</td>
       <td class="col-club">
         <span class="club-cell">
           ${crestHtml(row.team, row.crest, "crest-xs")}
@@ -825,17 +953,43 @@ function forecastRow(row, index) {
       </td>
       <td class="num-soft">${row.current_played}</td>
       <td class="num">${row.current_points}</td>
-      <td>${bar("title", row.title_prob)}</td>
-      <td>${bar("top4", row.ucl_prob ?? row.top4_prob)}</td>
-      <td>${bar("top4", row.europe_prob || 0)}</td>
-      <td>${bar("rel", row.relegation_prob)}</td>
       <td class="num">${fmtNum(row.expected_points)}</td>
-      <td class="num-soft">${fmtNum(row.expected_position)}</td>
+      <td>${databar("title", row.title_prob)}</td>
+      <td>${databar("ucl", row.ucl_prob ?? row.top4_prob)}</td>
+      <td>${databar("europe", row.europe_prob || 0)}</td>
+      <td>${databar("rel", row.relegation_prob)}</td>
     </tr>
   `;
 }
 
-function forecastTableBody() {
+function forecastCard(row) {
+  const zone = zoneFor(row.projected_rank, forecastState.meta);
+  const meta = forecastState.meta || {};
+  const odd = (label, kind, value) => html`
+    <div class="odd">
+      <span class="odd-label">${escapeHtml(label)}</span>
+      <span class="odd-track"><i class="${kind}" style="width:${Math.min(100, Math.round((value || 0) * 100))}%"></i></span>
+      <span class="odd-value">${fmtPct(value)}</span>
+    </div>
+  `;
+  return html`
+    <article class="club-card" ${zone ? `data-zone="${zone}"` : ""}>
+      <div class="club-card-top">
+        <span class="pos">${row.projected_rank}</span>
+        ${crestHtml(row.team, row.crest, "crest-sm")}
+        <span class="name">${escapeHtml(row.team)}</span>
+        <span class="pts">${fmtNum(row.expected_points)} <small>PROJ PTS</small></span>
+      </div>
+      <div class="club-card-odds">
+        ${odd("Title", "title", row.title_prob)}
+        ${odd(meta.ucl_label || "UCL", "ucl", row.ucl_prob ?? row.top4_prob)}
+        ${odd("Relegation", "rel", row.relegation_prob)}
+      </div>
+    </article>
+  `;
+}
+
+function sortedForecastRows() {
   const rows = [...forecastState.rows];
   const { sort, dir } = forecastState;
   if (sort) {
@@ -847,14 +1001,20 @@ function forecastTableBody() {
       return dir === "asc" ? a[sort] - b[sort] : b[sort] - a[sort];
     });
   }
-  return rows.map(forecastRow).join("");
+  return rows;
 }
 
-function paintForecastTable() {
+function paintForecast() {
+  const rows = sortedForecastRows();
   const body = document.getElementById("forecast-body");
   if (body) {
-    body.innerHTML = forecastTableBody();
+    body.innerHTML = rows.map(forecastRow).join("");
     bindCrestFallbacks(body);
+  }
+  const cards = document.getElementById("forecast-cards");
+  if (cards) {
+    cards.innerHTML = rows.map(forecastCard).join("");
+    bindCrestFallbacks(cards);
   }
   document.querySelectorAll("#forecast-table th[data-sort]").forEach((th) => {
     const active = th.dataset.sort === forecastState.sort;
@@ -865,138 +1025,173 @@ function paintForecastTable() {
 }
 
 function bindForecastSort() {
-  document.querySelectorAll("#forecast-table th[data-sort]").forEach((th) => {
-    th.addEventListener("click", () => {
-      const key = th.dataset.sort;
+  document.querySelectorAll("#forecast-table th[data-sort] .th-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      const key = button.parentElement.dataset.sort;
       if (forecastState.sort === key) {
         forecastState.dir = forecastState.dir === "desc" ? "asc" : "desc";
       } else {
         forecastState.sort = key;
         forecastState.dir = key === "team" ? "asc" : "desc";
       }
-      paintForecastTable();
-    });
-    th.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        th.click();
-      }
+      paintForecast();
     });
   });
 }
 
 async function renderForecast() {
   const data = await fetchJson(`/api/forecast${qs({ league: currentLeague() })}`);
-  setSeason(`${leagueName(data)} · ${data.live_season}`);
   setFootMeta(data.model, `Forecast generated ${formatStamp(data.generated_at)}`);
 
-  forecastState = { rows: data.teams || [], sort: null, dir: "desc" };
+  /* The projected finishing order is the table's own ordering: rank by mean
+     finishing position. The probabilities themselves are untouched. */
+  const rows = [...(data.teams || [])].sort((a, b) => a.expected_position - b.expected_position);
+  rows.forEach((row, index) => {
+    row.projected_rank = index + 1;
+  });
 
-  const podium = (data.teams || [])
-    .slice(0, 3)
+  forecastState = {
+    rows,
+    sort: null,
+    dir: "desc",
+    meta: {
+      n_teams: data.n_teams,
+      ucl_places: data.ucl_places,
+      europe_places: data.europe_places,
+      relegation_places: data.relegation_places,
+      ucl_label: data.ucl_label,
+      europa_label: data.europa_label,
+      conference_label: data.conference_label,
+    },
+  };
+
+  const leader = [...(data.teams || [])].sort((a, b) => b.title_prob - a.title_prob)[0];
+  const chasers = [...(data.teams || [])]
+    .sort((a, b) => b.title_prob - a.title_prob)
+    .slice(1, 5)
+    .filter((row) => row.title_prob > 0);
+
+  const max = Math.max(leader ? leader.title_prob : 0.0001, 0.0001);
+  const chaseRows = chasers
     .map(
       (row, index) => html`
-        <article class="podium-card ${index === 0 ? "is-first" : ""}">
-          ${crestHtml(row.team, row.crest, "crest-md")}
-          <div class="podium-body">
-            <span class="podium-label">${index === 0 ? "Favourite" : `${index + 1}${index === 1 ? "nd" : "rd"} most likely`}</span>
-            <span class="podium-name">${escapeHtml(row.team)}</span>
-            <span class="podium-pct">${fmtPct(row.title_prob)}</span>
-          </div>
-        </article>
+        <div class="race-row">
+          <span class="race-fill" style="--w:${Math.round((row.title_prob / max) * 100)}%"></span>
+          <span class="race-pos">${index + 2}</span>
+          ${crestHtml(row.team, row.crest, "crest-xs")}
+          <span class="race-name">${escapeHtml(row.team)}</span>
+          <span class="race-pct">${fmtPct(row.title_prob)}</span>
+        </div>
       `,
     )
     .join("");
 
   const headCells = FORECAST_COLUMNS.map((col) => {
-    if (!col.sortable) return `<th scope="col">${col.label}</th>`;
-    return `<th scope="col" data-sort="${col.key}" tabindex="0" role="columnheader" aria-sort="none">${col.label} <span class="arrow"></span></th>`;
+    if (!col.sortable) return `<th scope="col"><span class="th-flat">${col.label}</span></th>`;
+    return html`<th scope="col" data-sort="${col.key}" aria-sort="none">
+      <button type="button" class="th-btn">${col.label} <span class="arrow" aria-hidden="true"></span></button>
+    </th>`;
   }).join("");
 
+  const key = [
+    ["ucl", data.ucl_label, `top ${data.ucl_places}`],
+    ["europa", data.europa_label, ""],
+    ["conference", data.conference_label, ""],
+    ["releg", "Relegation", `bottom ${data.relegation_places}`],
+  ]
+    .filter(([, label]) => label)
+    .map(
+      ([zone, label, hint]) =>
+        `<span><i style="background:var(--${zone})"></i>${escapeHtml(label)}${hint ? ` (${hint})` : ""}</span>`,
+    )
+    .join("");
+
   view.innerHTML = html`
-    <div class="page-head">
-      <div class="page-head-main">
-        <p class="eyebrow">Season ${escapeHtml(data.live_season)}</p>
-        <h1>Season forecast</h1>
-        <p class="lede">
-          Every remaining fixture is replayed ${data.n_sims.toLocaleString("en-GB")} times using the
-          stored Home / Draw / Away probabilities, then the final table is counted up.
-          ${data.qualification_note ? ` ${escapeHtml(data.qualification_note)}` : ""}
-        </p>
-      </div>
-    </div>
+    ${pageHead(
+      `${leagueName(data)}, ${data.live_season}`,
+      "Season forecast",
+      `Every remaining fixture is replayed ${formatCount(data.n_sims)} times using the stored Home, Draw and Away probabilities, then the final table is counted up.`,
+    )}
 
-    <section class="race-podium">${podium}</section>
+    <section class="race-lead">
+      ${leader
+        ? html`
+            <article class="champ">
+              ${crestHtml(leader.team, leader.crest, "crest-lg")}
+              <div class="champ-body">
+                <span class="champ-label">Most likely champion</span>
+                <span class="champ-name">${escapeHtml(leader.team)}</span>
+              </div>
+              <span class="champ-pct">${fmtPct(leader.title_prob)}</span>
+            </article>
+          `
+        : ""}
+      ${chaseRows
+        ? html`<article class="chase">
+            <span class="champ-label">Chasing</span>
+            <div class="race-list">${chaseRows}</div>
+          </article>`
+        : ""}
+    </section>
 
-    <section class="kpi-grid">
-      <article class="kpi">
-        <span class="kpi-label">Simulations</span>
-        <span class="kpi-value">${data.n_sims.toLocaleString("en-GB")}</span>
-        <span class="kpi-foot">Seed ${data.seed} · reproducible</span>
-      </article>
-      <article class="kpi">
-        <span class="kpi-label">Matches played</span>
-        <span class="kpi-value">${data.n_completed}</span>
-        <span class="kpi-foot">Points already on the board</span>
-      </article>
-      <article class="kpi">
-        <span class="kpi-label">Still to play</span>
-        <span class="kpi-value">${data.n_remaining}</span>
-        <span class="kpi-foot">Sampled in every simulation</span>
-      </article>
-      <article class="kpi">
-        <span class="kpi-label">Forecast generated</span>
-        <span class="kpi-value sm">${formatStamp(data.generated_at)}</span>
-        <span class="kpi-foot">Rebuilt by the pipeline</span>
-      </article>
+    <section class="statbar section" aria-label="Simulation detail">
+      ${statCell("Simulations", formatCount(data.n_sims), `Seed ${data.seed}, reproducible`)}
+      ${statCell("Played", formatCount(data.n_completed), "Points already on the board")}
+      ${statCell("Still to play", formatCount(data.n_remaining), "Sampled in every simulation")}
+      ${statCell("Generated", formatStamp(data.generated_at), "Rebuilt by the pipeline", { small: true })}
     </section>
 
     <section class="section">
       <div class="section-head">
         <h2>Projected table</h2>
-        <span class="help">Select a column heading to sort</span>
+        <span class="help">Ordered by projected finish</span>
       </div>
       <div class="table-scroll">
         <table class="standings" id="forecast-table">
+          <caption class="vh">Projected final table with qualification and relegation probabilities</caption>
           <thead>
             <tr>${headCells}</tr>
           </thead>
           <tbody id="forecast-body"></tbody>
         </table>
       </div>
-      <div class="legend">
-        <span><i style="background:var(--accent)"></i> Title contender</span>
-        <span><i style="background:var(--away)"></i> Likely Champions League</span>
-        <span><i style="background:var(--miss)"></i> Likely relegation</span>
-        <span>Rows are ordered by title probability until you sort.</span>
-      </div>
+      <div class="standings-cards" id="forecast-cards"></div>
+      <div class="zonekey">${key}</div>
     </section>
 
     <div class="detail-cols">
+      <article class="panel">
+        <h2>How the places are decided</h2>
+        <p class="help">${escapeHtml(data.qualification_note || "")}</p>
+      </article>
       <article class="panel">
         <h2>How ties are broken</h2>
         <p class="help">${escapeHtml(data.tiebreak)}</p>
       </article>
       <article class="panel">
-        <h2>Early-season caution</h2>
+        <h2>Early in the season</h2>
         <p class="help">${escapeHtml(data.early_season_note || "")}</p>
       </article>
     </div>
   `;
 
-  paintForecastTable();
+  paintForecast();
   bindForecastSort();
   bindCrestFallbacks(view);
 }
 
-/* --------------------------------------------------------- match detail -- */
+/* ==========================================================================
+   Match detail
+   ========================================================================== */
 
 function heroSide(name, crest, positionLabel) {
   return html`
     <div class="hero-side">
       ${crestHtml(name, crest, "crest-lg")}
       <p class="hero-team">${escapeHtml(name)}</p>
-      ${positionLabel ? `<span class="rank-pill">${escapeHtml(positionLabel)}</span>` : ""}
+      ${positionLabel
+        ? `<span class="rank-pill">${escapeHtml(positionLabel)}<span class="rank-suffix"> in the table</span></span>`
+        : ""}
     </div>
   `;
 }
@@ -1004,12 +1199,12 @@ function heroSide(name, crest, positionLabel) {
 function matchHero(match, { settled }) {
   const center = settled
     ? html`
-        <span class="hero-score">${match.home_goals}–${match.away_goals}</span>
-        <span class="hero-sub">${escapeHtml(match.actual_outcome || "Full time")}</span>
+        <span class="hero-score">${match.home_goals}-${match.away_goals}</span>
+        <span class="hero-sub">${escapeHtml(match.actual_outcome ? `${match.actual_outcome} won` : "Full time")}</span>
       `
     : html`
         <span class="hero-kick">${escapeHtml(match.kickoff_time || "TBC")}</span>
-        <span class="hero-sub">${escapeHtml(formatShortDate(match.kickoff_date))}</span>
+        <span class="hero-sub">${escapeHtml(formatLongDay(match.kickoff_date))}</span>
       `;
 
   const statusTag = settled
@@ -1020,20 +1215,20 @@ function matchHero(match, { settled }) {
     ? html`
         <div class="hero-prediction">
           <div class="hero-pred-head">
-            <h2>${settled ? "Pre-match prediction" : "Win probability"}</h2>
-            <div style="display:flex;gap:var(--sp-2);align-items:center;flex-wrap:wrap">
+            <h2>${settled ? "What was predicted before kickoff" : "Win probability"}</h2>
+            <div class="hero-tags">
               ${settled ? verdictBadge(match.correct) : noteTag(match.note)}
               <span class="tag">${escapeHtml(match.model_name || "Model")}</span>
             </div>
           </div>
-          ${probStrip(match, { large: true, showFlags: true })}
+          ${probBar(match, { large: true })}
         </div>
       `
     : html`
         <div class="hero-prediction">
           <p class="no-pred">
-            No stored pre-match prediction for this match. MatchLab only shows probabilities that
-            were recorded before kickoff.
+            No prediction was stored before this match. MatchLab only shows probabilities that were
+            recorded ahead of kickoff, so nothing is filled in after the fact.
           </p>
         </div>
       `;
@@ -1041,7 +1236,7 @@ function matchHero(match, { settled }) {
   return html`
     <article class="match-hero">
       <div class="hero-meta">
-        <span>${escapeHtml(match.competition || "Premier League")} · ${formatKickoff(match.kickoff_date, match.kickoff_time)}</span>
+        <span>${escapeHtml(match.competition || "")}, ${formatKickoff(match.kickoff_date, match.kickoff_time)}</span>
         ${statusTag}
       </div>
       <div class="hero-board">
@@ -1058,34 +1253,34 @@ function h2hRow(meeting) {
   const href = meeting.detail_path
     ? withLeague(meeting.detail_path)
     : withLeague(`/results/${meeting.match_id}`);
+  /* result_code is the stored integer class: 0 away, 1 draw, 2 home. */
+  const side = { 0: "away", 1: "draw", 2: "home" }[meeting.result_code] || "";
   return html`
     <a class="h2h-row" data-link href="${href}">
       <span class="h2h-date">${formatShortDate(meeting.kickoff_date)}</span>
       <span class="h2h-teams">
         ${crestHtml(meeting.home_team, meeting.home_crest, "crest-xs")}
         <span class="nm">${escapeHtml(meeting.home_team)}</span>
-        <span class="sc">${meeting.home_goals}–${meeting.away_goals}</span>
+        <span class="sc">${meeting.home_goals}-${meeting.away_goals}</span>
         <span class="nm">${escapeHtml(meeting.away_team)}</span>
         ${crestHtml(meeting.away_team, meeting.away_crest, "crest-xs")}
       </span>
-      <span class="h2h-outcome">${escapeHtml(meeting.result_label || "")}</span>
+      <span class="h2h-out ${side}">${escapeHtml(meeting.result_label || "")}</span>
     </a>
   `;
 }
 
-function h2hPanel(data, match) {
+function h2hPanel(data) {
   const meetings = data.head_to_head || [];
   return html`
     <article class="panel">
       <h2>Previous meetings</h2>
       <p class="help">
         ${meetings.length
-          ? `Last ${meetings.length} completed meeting${meetings.length === 1 ? "" : "s"} between these clubs before this fixture.`
-          : "No previous meetings in the ingested history."}
+          ? `The last ${meetings.length} time${meetings.length === 1 ? "" : "s"} these clubs met in this competition before this match.`
+          : "These clubs have not met before in the history MatchLab has ingested for this competition."}
       </p>
-      ${meetings.length
-        ? `<div class="h2h-list" style="margin-top:var(--sp-4)">${meetings.map(h2hRow).join("")}</div>`
-        : ""}
+      ${meetings.length ? `<div class="h2h-list">${meetings.map(h2hRow).join("")}</div>` : ""}
     </article>
   `;
 }
@@ -1095,7 +1290,7 @@ function statsPanel(match, stats, available) {
     return html`
       <article class="panel">
         <h2>Match stats</h2>
-        <p class="help">Detailed stats are not available for this match in the ingested source.</p>
+        <p class="help">Detailed stats are not available for this match in the source data.</p>
       </article>
     `;
   }
@@ -1103,18 +1298,17 @@ function statsPanel(match, stats, available) {
     .map((stat) => {
       const total = (Number(stat.home) || 0) + (Number(stat.away) || 0);
       const homeShare = total > 0 ? (Number(stat.home) / total) * 100 : 50;
-      const awayShare = total > 0 ? 100 - homeShare : 50;
       const flat = total === 0;
       return html`
         <div class="statrow">
           <div class="statrow-top">
             <span class="n ${stat.leader === "home" ? "lead" : ""}">${stat.home}</span>
             <span class="label">${escapeHtml(stat.label)}</span>
-            <span class="n away ${stat.leader === "away" ? "lead" : ""}">${stat.away}</span>
+            <span class="n ${stat.leader === "away" ? "lead" : ""}">${stat.away}</span>
           </div>
           <div class="stat-track">
             <i class="${flat ? "flat" : "home"}" style="width:${flat ? 50 : homeShare}%"></i>
-            <i class="${flat ? "flat" : "away"}" style="width:${flat ? 50 : awayShare}%"></i>
+            <i class="${flat ? "flat" : "away"}" style="width:${flat ? 50 : 100 - homeShare}%"></i>
           </div>
         </div>
       `;
@@ -1133,55 +1327,56 @@ function statsPanel(match, stats, available) {
   `;
 }
 
-async function renderMatchDetail(matchId, requestedKind) {
+function chanceGiven(match) {
+  if (match.actual_outcome === "Draw") return match.p_draw_pct;
+  if (match.actual_outcome === match.home_team) return match.p_home_pct;
+  return match.p_away_pct;
+}
+
+async function renderMatchDetail(matchId) {
   const data = await fetchJson(`/api/matches/${matchId}`);
   const league = (data.competition && data.competition.code) || currentLeague();
+  rememberLeague(league);
   const canonical = `${data.kind === "result" ? "/results" : "/upcoming"}/${matchId}?league=${league}`;
   if (`${pathOf()}${window.location.search}` !== canonical) {
     window.history.replaceState({}, "", canonical);
-    setNav();
   }
+  setNav();
 
   const match = data.match;
   const settled = data.kind === "result";
-  setSeason(`${leagueName(data)} · ${data.live_season}`);
   setFootMeta(data.model);
 
-  const secondary = settled
-    ? html`
-        <div class="detail-cols">
-          ${statsPanel(match, data.stats || [], data.stats_available)}
-          <article class="panel">
-            <h2>Prediction vs result</h2>
-            ${match.has_prediction
-              ? html`
-                  <p class="help">How the stored pre-match call compared with what happened.</p>
-                  <div class="metric-grid" style="margin-top:var(--sp-4)">
-                    <div class="metric"><span>Picked</span><strong style="font-family:var(--font-display);font-size:1rem">${escapeHtml(match.predicted_outcome)}</strong></div>
-                    <div class="metric"><span>Actual</span><strong style="font-family:var(--font-display);font-size:1rem">${escapeHtml(match.actual_outcome || "—")}</strong></div>
-                    <div class="metric"><span>Chance given</span><strong>${
-                      match.actual_outcome === match.home_team
-                        ? match.p_home_pct
-                        : match.actual_outcome === "Draw"
-                          ? match.p_draw_pct
-                          : match.p_away_pct
-                    }%</strong></div>
-                  </div>
-                  <p class="help" style="margin-top:var(--sp-4)">
-                    Probabilities were frozen at ${formatStamp(match.predicted_at)} and have not been
-                    changed since the result arrived.
-                  </p>
-                `
-              : `<p class="help">This match predates the live season, so no pre-match prediction was stored for it. MatchLab never back-fills a prediction after the fact.</p>`}
-          </article>
-        </div>
+  const verdictPanel =
+    settled && match.has_prediction
+      ? html`
+        <article class="panel">
+          <h2>Prediction against the result</h2>
+          ${html`
+                <p class="help">What the model called before kickoff, and what actually happened.</p>
+                <div class="metric-grid">
+                  <div class="metric"><span>Called</span><strong class="name">${escapeHtml(match.predicted_outcome)}</strong></div>
+                  <div class="metric"><span>Result</span><strong class="name">${escapeHtml(match.actual_outcome || NONE)}</strong></div>
+                  <div class="metric"><span>Odds it gave that</span><strong>${chanceGiven(match)}%</strong></div>
+                </div>
+                <p class="help" style="margin-top:var(--sp-4)">
+                  These probabilities were frozen at ${formatStamp(match.predicted_at)} and have not been
+                  touched since the result came in.
+                </p>
+              `}
+        </article>
       `
-    : html`<div class="detail-cols">${h2hPanel(data, match)}</div>`;
+      : "";
+
+  const secondary = settled
+    ? `<div class="detail-cols">${statsPanel(match, data.stats || [], data.stats_available)}${verdictPanel}</div>
+       <div class="detail-cols">${h2hPanel(data)}</div>`
+    : `<div class="detail-cols">${h2hPanel(data)}</div>`;
 
   view.innerHTML = html`
     <p class="back-row">
       <a class="pill" data-link href="${withLeague(settled ? "/results" : "/upcoming")}">
-        ← Back to ${settled ? "results" : "fixtures"}
+        Back to ${settled ? "results" : "fixtures"}
       </a>
     </p>
     ${matchHero(match, { settled })} ${secondary}
@@ -1189,16 +1384,13 @@ async function renderMatchDetail(matchId, requestedKind) {
   bindCrestFallbacks(view);
 }
 
-/* ---------------------------------------------------------------- about -- */
-
-function metric(label, value) {
-  return html`<div class="metric"><span>${label}</span><strong>${value}</strong></div>`;
-}
+/* ==========================================================================
+   Method
+   ========================================================================== */
 
 async function renderAbout() {
   const data = await fetchJson(`/api/about${qs({ league: currentLeague() })}`);
   const test = data.test || {};
-  setSeason(leagueName(data));
   setFootMeta(data.model);
 
   const folds = (data.walkforward_folds || [])
@@ -1206,97 +1398,102 @@ async function renderAbout() {
       (fold) => html`
         <div class="fold-row">
           <span class="fold-name">${escapeHtml(fold.valid_season)}</span>
-          <span class="help">trained on everything through ${escapeHtml(fold.train_through)}</span>
+          <span class="help">trained on everything up to ${escapeHtml(fold.train_through)}</span>
         </div>
       `,
     )
     .join("");
 
   view.innerHTML = html`
-    <div class="page-head">
-      <div class="page-head-main">
-        <p class="eyebrow">${escapeHtml(data.model.model_name)} · ${escapeHtml(data.feature_version)}</p>
-        <h1>The model</h1>
-        <p class="lede">
-          Every probability on this site comes from one logistic regression, chosen by out-of-time
-          walk-forward validation and never trained on a match it is asked to predict.
-        </p>
-      </div>
-    </div>
+    ${pageHead(
+      leagueName(data),
+      "How MatchLab predicts",
+      "Every probability on this site comes from one model per league, chosen on seasons it had never seen, and never trained on a match it is asked to predict.",
+    )}
 
-    <section class="kpi-grid">
-      <article class="kpi kpi-accent">
-        <span class="kpi-label">Walk-forward log loss</span>
-        <span class="kpi-value">${data.walkforward_mean_log_loss != null ? Number(data.walkforward_mean_log_loss).toFixed(3) : "—"}</span>
-        <span class="kpi-foot">Mean across ${(data.walkforward_folds || []).length} out-of-time seasons</span>
-      </article>
-      <article class="kpi">
-        <span class="kpi-label">Walk-forward accuracy</span>
-        <span class="kpi-value">${data.walkforward_mean_accuracy != null ? pct(data.walkforward_mean_accuracy) : "—"}</span>
-        <span class="kpi-foot">Diagnostic only, not the selection metric</span>
-      </article>
-      <article class="kpi">
-        <span class="kpi-label">Holdout accuracy</span>
-        <span class="kpi-value">${test.accuracy != null ? pct(test.accuracy) : "—"}</span>
-        <span class="kpi-foot">${escapeHtml(data.test_season)} · scored once</span>
-      </article>
-      <article class="kpi">
-        <span class="kpi-label">Holdout matches</span>
-        <span class="kpi-value">${test.n ?? "—"}</span>
-        <span class="kpi-foot">Never used to choose the model</span>
-      </article>
+    <section class="statbar" aria-label="Model at a glance">
+      ${statCell("Holdout accuracy", test.accuracy != null ? pct(test.accuracy) : NONE, `${data.test_season}, scored once`, { accent: true })}
+      ${statCell("Holdout matches", formatCount(test.n ?? 0), "Never used to pick the model")}
+      ${statCell("Selection score", data.walkforward_mean_log_loss != null ? Number(data.walkforward_mean_log_loss).toFixed(3) : NONE, `Mean log loss over ${(data.walkforward_folds || []).length} unseen seasons`)}
+      ${statCell("Model", data.model.model_name, `Feature set ${data.feature_version}`, { small: true })}
     </section>
 
     <div class="about-grid section">
       <article class="panel">
-        <h2>Why this model</h2>
-        <p class="help">${escapeHtml(data.selection_reason || "")}</p>
-        <div class="fold-list" style="margin-top:var(--sp-4)">${folds}</div>
-      </article>
-
-      <article class="panel">
-        <h2>How the seasons are used</h2>
+        <h2>What it predicts</h2>
+        <p class="help">
+          One probability each for a home win, a draw and an away win. The three always add up to
+          100%, and the highest of them is what MatchLab calls as the likely result. It does not
+          predict scorelines.
+        </p>
         <ul class="plain-list">
-          <li>${escapeHtml(data.history.ingest)}</li>
-          <li>${escapeHtml(data.history.walkforward)}</li>
-          <li>${escapeHtml(data.history.production_train)}</li>
-          <li>${escapeHtml(data.history.test)}</li>
-          <li>${escapeHtml(data.history.live)}</li>
+          <li>Probabilities are written down before kickoff and never changed afterwards.</li>
+          <li>Matches played before MatchLab covered a league simply show no prediction.</li>
+          <li>Every league has its own model, trained only on that competition.</li>
         </ul>
       </article>
 
       <article class="panel">
-        <h2>Untouched ${escapeHtml(data.test_season)} holdout</h2>
-        <p class="help">Scored once, after the model was chosen.</p>
-        <div class="metric-grid" style="margin-top:var(--sp-4)">
-          ${metric("Accuracy", test.accuracy != null ? pct(test.accuracy) : "—")}
-          ${metric("Log loss", test.log_loss != null ? Number(test.log_loss).toFixed(3) : "—")}
-          ${metric("Matches", test.n ?? "—")}
-          ${metric("Home F1", test.f1_home != null ? Number(test.f1_home).toFixed(3) : "—")}
-          ${metric("Draw F1", test.f1_draw != null ? Number(test.f1_draw).toFixed(3) : "—")}
-          ${metric("Away F1", test.f1_away != null ? Number(test.f1_away).toFixed(3) : "—")}
-        </div>
-      </article>
-
-      <article class="panel">
-        <h2>What the model looks at</h2>
+        <h2>What it looks at</h2>
         <ul class="feature-list">
           ${data.features
             .map((item) => `<li><b>${escapeHtml(item.title)}.</b> ${escapeHtml(item.detail)}</li>`)
             .join("")}
         </ul>
-        <p class="help" style="margin-top:var(--sp-4)">${escapeHtml(data.leakage_note)}</p>
       </article>
 
-      <article class="panel span-all">
-        <h2>A known limitation: draws</h2>
+      <article class="panel">
+        <h2>Why it can be trusted</h2>
+        <p class="help">${escapeHtml(data.leakage_note)}</p>
+        <ul class="plain-list">
+          ${(data.history ? [data.history.ingest, data.history.walkforward, data.history.production_train, data.history.test, data.history.live] : [])
+            .filter(Boolean)
+            .map((line) => `<li>${escapeHtml(line)}</li>`)
+            .join("")}
+        </ul>
+      </article>
+
+      <article class="panel">
+        <h2>Where it falls down</h2>
         <p class="help">${escapeHtml(data.draw_limitation)}</p>
+      </article>
+
+      <article class="panel">
+        <h2>How the model was chosen</h2>
+        <p class="help">
+          Each candidate was retrained repeatedly, always on older seasons only, then scored on the
+          following season it had never seen. The one with the best average score won.
+        </p>
+        <div class="fold-list">${folds}</div>
+      </article>
+
+      <article class="panel">
+        <h2>The numbers behind it</h2>
+        <p class="help">For anyone who wants the detail. These are diagnostics, not the headline.</p>
+        <dl class="spec">
+          <dt>Selection</dt>
+          <dd>${escapeHtml(data.selection_reason || "")}</dd>
+          <dt>Holdout season</dt>
+          <dd>${escapeHtml(data.test_season)}</dd>
+          <dt>Holdout log loss</dt>
+          <dd>${test.log_loss != null ? Number(test.log_loss).toFixed(3) : NONE}</dd>
+          <dt>Holdout F1</dt>
+          <dd>
+            home ${test.f1_home != null ? Number(test.f1_home).toFixed(3) : NONE}, draw
+            ${test.f1_draw != null ? Number(test.f1_draw).toFixed(3) : NONE}, away
+            ${test.f1_away != null ? Number(test.f1_away).toFixed(3) : NONE}
+          </dd>
+          <dt>Walk-forward accuracy</dt>
+          <dd>${data.walkforward_mean_accuracy != null ? pct(data.walkforward_mean_accuracy) : NONE}</dd>
+        </dl>
       </article>
     </div>
   `;
 }
 
-/* --------------------------------------------------------------- router -- */
+/* ==========================================================================
+   Router
+   ========================================================================== */
 
 const routes = {
   "/": renderOverview,
@@ -1308,24 +1505,22 @@ const routes = {
 };
 
 async function render() {
+  closeLeagueMenu();
+  rememberLeague(currentLeague());
+  pinLeagueToUrl();
   setNav();
-  const detail = matchDetailRoute();
   try {
+    const detail = matchDetailRoute();
     if (detail) {
-      await renderMatchDetail(detail.id, detail.kind);
+      await renderMatchDetail(detail.id);
       return;
     }
     const route = routes[pathOf()] || renderOverview;
     await route();
   } catch (error) {
     view.innerHTML = html`
-      <div class="page-head">
-        <div class="page-head-main">
-          <h1>Something went wrong</h1>
-          <p class="lede">${escapeHtml(error.message || "Could not load this page from the database.")}</p>
-        </div>
-      </div>
-      <p class="back-row"><a class="btn btn-primary" data-link href="${withLeague("/")}">Back to overview</a></p>
+      ${pageHead("", "This page could not load", escapeHtml(error.message || "Could not load this page from the database."))}
+      <p class="back-row"><a class="btn btn-primary" data-link href="${withLeague("/")}">Back to the overview</a></p>
     `;
   }
 }
@@ -1333,7 +1528,7 @@ async function render() {
 function go(href) {
   const url = new URL(href, window.location.origin);
   window.history.pushState({}, "", `${url.pathname}${url.search}`);
-  window.scrollTo({ top: 0, behavior: "instant" in window ? "instant" : "auto" });
+  window.scrollTo({ top: 0, behavior: "instant" });
   render();
 }
 
@@ -1348,4 +1543,21 @@ document.addEventListener("click", (event) => {
 });
 
 window.addEventListener("popstate", render);
-render();
+
+/* Load the competition catalog once, so the league menu and the forecast
+   zones both come from the backend rather than a second copy in the client. */
+async function boot() {
+  try {
+    const payload = await fetchJson("/api/competitions");
+    catalog = {
+      competitions: payload.competitions || [],
+      default: payload.default || DEFAULT_LEAGUE,
+      byCode: Object.fromEntries((payload.competitions || []).map((spec) => [spec.code, spec])),
+    };
+  } catch (error) {
+    /* The league menu stays empty, but every page still renders. */
+  }
+  await render();
+}
+
+boot();

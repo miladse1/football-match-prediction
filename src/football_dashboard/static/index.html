@@ -2,17 +2,26 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="dark" />
-    <meta name="theme-color" content="#0a0d0a" />
+    <meta name="theme-color" content="#090c09" />
     <title>MatchLab · Top 5 league predictions</title>
+    <meta
+      name="description"
+      content="Home, Draw and Away probabilities for the Premier League, La Liga, Bundesliga, Serie A and Ligue 1, frozen before kickoff and scored honestly."
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23e8bb63'/%3E%3Cpath d='M9 22V10h2.6l4.4 7.1L20.4 10H23v12h-2.5v-7.6L16.6 21h-1.2l-3.9-6.6V22z' fill='%2316120a'/%3E%3C/svg%3E"
+    />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="preconnect" href="https://crests.football-data.org" crossorigin />
     <link
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Familjen+Grotesk:wght@500;600;700&display=swap"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=top5" />
+    <link rel="stylesheet" href="/static/styles.css?v=5" />
   </head>
   <body>
     <a class="skip-link" href="#view">Skip to content</a>
@@ -21,59 +30,63 @@
       <div class="topbar-inner">
         <a class="brand" href="/" data-link aria-label="MatchLab home">
           <span class="brand-mark" aria-hidden="true">ML</span>
-          <span class="brand-text">
-            <span class="brand-name">MatchLab</span>
-            <span class="brand-sub" id="season-label">Premier League</span>
-          </span>
+          <span class="brand-name" translate="no">MatchLab</span>
         </a>
+
+        <!-- League selection lives in one control, not a second header row. -->
+        <div class="league-picker" id="league-picker">
+          <button
+            type="button"
+            class="league-button"
+            id="league-button"
+            aria-expanded="false"
+            aria-haspopup="true"
+            aria-controls="league-menu"
+          >
+            <span class="mark" id="league-button-mark" aria-hidden="true"></span>
+            <span id="league-button-name">Premier League</span>
+            <span class="chev" aria-hidden="true">▾</span>
+          </button>
+          <div class="league-menu" id="league-menu" role="menu" aria-label="Choose a league" hidden>
+            <p class="league-menu-label">Competition</p>
+            <div id="league-options"></div>
+          </div>
+        </div>
 
         <nav class="nav" id="nav" aria-label="Primary">
           <a href="/" data-link data-nav="/">Overview</a>
           <a href="/upcoming" data-link data-nav="/upcoming">Fixtures</a>
           <a href="/results" data-link data-nav="/results">Results</a>
           <a href="/forecast" data-link data-nav="/forecast">Forecast</a>
-          <a href="/performance" data-link data-nav="/performance">Performance</a>
-          <a href="/about" data-link data-nav="/about">The model</a>
-        </nav>
-      </div>
-      <div class="league-bar">
-        <nav class="league-switch" id="league-switch" aria-label="Competition">
-          <a href="/?league=E0" data-link data-league="E0" class="league-chip">
-            <span class="league-mark">PL</span><span>Premier League</span>
-          </a>
-          <a href="/?league=SP1" data-link data-league="SP1" class="league-chip">
-            <span class="league-mark">LL</span><span>La Liga</span>
-          </a>
-          <a href="/?league=D1" data-link data-league="D1" class="league-chip">
-            <span class="league-mark">BL</span><span>Bundesliga</span>
-          </a>
-          <a href="/?league=I1" data-link data-league="I1" class="league-chip">
-            <span class="league-mark">SA</span><span>Serie A</span>
-          </a>
-          <a href="/?league=F1" data-link data-league="F1" class="league-chip">
-            <span class="league-mark">L1</span><span>Ligue 1</span>
-          </a>
+          <a href="/performance" data-link data-nav="/performance">Accuracy</a>
+          <a href="/about" data-link data-nav="/about">Method</a>
         </nav>
       </div>
     </header>
 
     <main id="view" class="view" tabindex="-1">
       <div class="skeleton-wrap" aria-live="polite" aria-busy="true">
-        <span class="spinner" aria-hidden="true"></span>
-        <p>Loading MatchLab…</p>
+        <span class="vh">Loading…</span>
+        <div class="sk sk-title" aria-hidden="true"></div>
+        <div class="sk sk-row" aria-hidden="true"></div>
+        <div class="sk-grid" aria-hidden="true">
+          <div class="sk sk-card"></div>
+          <div class="sk sk-card"></div>
+          <div class="sk sk-card"></div>
+        </div>
       </div>
     </main>
 
     <footer class="sitefoot">
       <div class="sitefoot-inner">
         <p>
-          <strong>MatchLab</strong> · Home / Draw / Away probabilities for the top five
-          European leagues from leakage-safe walk-forward models.
+          <strong translate="no">MatchLab</strong> predicts Home, Draw and Away for the top five
+          European leagues. Probabilities are stored before kickoff and never rewritten afterwards.
         </p>
-        <p class="sitefoot-meta" id="foot-meta"></p>
+        <p id="foot-meta"></p>
       </div>
     </footer>
 
-    <script src="/static/app.js?v=top5"></script>
+    <script src="/static/app.js?v=5"></script>
   </body>
 </html>

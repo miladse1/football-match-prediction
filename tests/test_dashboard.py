@@ -306,3 +306,43 @@ def test_dashboard_queries_always_filter_by_competition():
     assert "competition=_league(league)" in Path("src/football_dashboard/app.py").read_text(
         encoding="utf-8"
     )
+
+
+def test_match_detail_builds_head_to_head_for_played_matches_too():
+    """Completed match pages show previous meetings, not only upcoming ones.
+
+    The early ``return`` that used to sit inside the ``if played`` branch meant
+    a finished match never reached the head-to-head query.
+    """
+    from pathlib import Path
+
+    source = Path("src/football_dashboard/queries.py").read_text(encoding="utf-8")
+    body = source.split("def match_detail_payload")[1].split("\ndef ")[0]
+    played_branch = body.split('if played:')[1].split("meetings = prior_head_to_head")[0]
+    assert "return payload" not in played_branch
+    assert body.count("prior_head_to_head") == 1
+    assert 'payload["head_to_head"] = meetings' in body
+
+
+def test_head_to_head_query_is_scoped_to_one_competition_and_earlier_dates():
+    """H2H must never mix competitions or leak a later meeting into the list."""
+    from pathlib import Path
+
+    source = Path("src/football_dashboard/queries.py").read_text(encoding="utf-8")
+    query = source.split("def prior_head_to_head")[1].split("\ndef ")[0]
+    assert "m.competition_id = (" in query
+    assert "m.match_date < %s" in query
+    assert "m.id <> %s" in query
+    assert "m.is_played" in query
+
+
+def test_frontend_never_renders_a_probability_without_a_stored_prediction():
+    """The honesty rule, enforced on the client as well as the API."""
+    from pathlib import Path
+
+    app_js = Path("src/football_dashboard/static/app.js").read_text(encoding="utf-8")
+    # Every probability bar sits behind a has_prediction check.
+    assert app_js.count("probBar(") == 3  # one definition, two guarded call sites
+    for guarded in ("item.has_prediction\n    ? probBar(item)", "match.has_prediction\n    ? html`"):
+        assert guarded in app_js
+    assert "No prediction was stored before this match." in app_js

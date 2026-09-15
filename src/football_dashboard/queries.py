@@ -697,7 +697,6 @@ def match_detail_payload(match_id: int) -> dict | None:
     if played:
         payload["stats"] = stats
         payload["stats_available"] = bool(stats)
-        return payload
     meetings = prior_head_to_head(
         home_team_id=int(row["home_team_id"]),
         away_team_id=int(row["away_team_id"]),

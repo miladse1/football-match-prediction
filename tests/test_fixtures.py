@@ -40,3 +40,20 @@ def test_fixtures_to_payloads_strips_scores_and_keeps_every_row():
     assert payloads[1]["Time"] == "14:00"
     assert payloads[2]["HomeTeam"] == "Spurs"
     assert all(row["Div"] == "E0" and row["FTHG"] == "" for row in payloads)
+
+
+def test_fixtures_to_payloads_uses_the_requested_competition_code():
+    rows = [
+        {
+            "MatchNumber": 1,
+            "RoundNumber": 1,
+            "DateUtc": "2026-08-15 11:30:00Z",
+            "HomeTeam": "Barcelona",
+            "AwayTeam": "Real Madrid",
+            "HomeTeamScore": None,
+            "AwayTeamScore": None,
+        }
+    ]
+    payloads = fixtures_to_payloads(rows, competition="SP1")
+    assert payloads[0]["Div"] == "SP1"
+    assert payloads[0]["HomeTeam"] == "Barcelona"

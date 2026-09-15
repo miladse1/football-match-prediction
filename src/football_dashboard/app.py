@@ -1,4 +1,4 @@
-"""Read-only Premier League prediction dashboard."""
+"""Read-only Top 5 European leagues prediction dashboard."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from football_dashboard.queries import (
     about_payload,
+    competitions_payload,
     forecast_payload,
     match_detail_payload,
     overview_payload,
@@ -17,17 +18,25 @@ from football_dashboard.queries import (
     results_payload,
     upcoming_payload,
 )
+from football_pipeline.competitions import CompetitionError, parse_competition
 from football_pipeline.season_sim import ForecastUnavailable
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 SPA_PAGES = {"upcoming", "results", "performance", "forecast", "about"}
 
-app = FastAPI(title="Premier League predictions", docs_url=None, redoc_url=None)
+app = FastAPI(title="MatchLab predictions", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 def _page() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
+
+
+def _league(league: str | None) -> str:
+    try:
+        return parse_competition(league)
+    except CompetitionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/")
@@ -40,13 +49,19 @@ def health() -> dict:
     return {"ok": True}
 
 
+@app.get("/api/competitions")
+def competitions() -> dict:
+    return competitions_payload()
+
+
 @app.get("/api/overview")
-def overview() -> dict:
-    return overview_payload()
+def overview(league: str | None = Query(default=None)) -> dict:
+    return overview_payload(competition=_league(league))
 
 
 @app.get("/api/upcoming")
 def upcoming(
+    league: str | None = Query(default=None),
     team: str | None = Query(default=None),
     date_from: str | None = Query(default=None),
     date_to: str | None = Query(default=None),
@@ -54,6 +69,7 @@ def upcoming(
     page_size: int = Query(default=16, ge=10, le=20),
 ) -> dict:
     return upcoming_payload(
+        competition=_league(league),
         team=team or None,
         date_from=date_from or None,
         date_to=date_to or None,
@@ -64,6 +80,7 @@ def upcoming(
 
 @app.get("/api/results")
 def results(
+    league: str | None = Query(default=None),
     team: str | None = Query(default=None),
     date_from: str | None = Query(default=None),
     date_to: str | None = Query(default=None),
@@ -71,6 +88,7 @@ def results(
     page_size: int = Query(default=16, ge=10, le=20),
 ) -> dict:
     return results_payload(
+        competition=_league(league),
         team=team or None,
         date_from=date_from or None,
         date_to=date_to or None,
@@ -80,19 +98,19 @@ def results(
 
 
 @app.get("/api/performance")
-def performance() -> dict:
-    return performance_payload()
+def performance(league: str | None = Query(default=None)) -> dict:
+    return performance_payload(competition=_league(league))
 
 
 @app.get("/api/about")
-def about() -> dict:
-    return about_payload()
+def about(league: str | None = Query(default=None)) -> dict:
+    return about_payload(competition=_league(league))
 
 
 @app.get("/api/forecast")
-def forecast() -> dict:
+def forecast(league: str | None = Query(default=None)) -> dict:
     try:
-        return forecast_payload()
+        return forecast_payload(competition=_league(league))
     except ForecastUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 

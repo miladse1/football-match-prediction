@@ -1,7 +1,8 @@
-"""Upcoming Premier League fixtures. Separate from football-data.co.uk results ingest.
+"""Upcoming fixtures. Separate from football-data.co.uk results ingest.
 
-Source: fixturedownload.com JSON for the current EPL season. Fixture scores in
-that JSON are ignored. Official results stay owned by football-data.co.uk.
+Source: fixturedownload.com JSON for the live season of one supported league.
+Fixture scores in that JSON are ignored. Official results stay owned by
+football-data.co.uk.
 """
 
 from __future__ import annotations
@@ -14,10 +15,12 @@ from datetime import datetime, timezone
 
 from psycopg.types.json import Jsonb
 
-from football_pipeline.config import FIXTURES_URL, RAW_DATA_DIR
+from football_pipeline.competitions import get as get_competition
+from football_pipeline.config import RAW_DATA_DIR
 from football_pipeline.db import connect
 from football_pipeline.football_data import USER_AGENT, current_season_start_year, season_name
-from football_pipeline.ingest import COMPETITIONS, _insert_payloads, _upsert_season
+from football_pipeline.ingest import _insert_payloads, _upsert_season
+from football_pipeline.seasons import fixtures_url
 
 logger = logging.getLogger(__name__)
 
@@ -63,14 +66,14 @@ def _parse_kickoff(value: str) -> tuple[str, str]:
     return utc.strftime("%d/%m/%Y"), utc.strftime("%H:%M")
 
 
-def fixtures_to_payloads(rows: list[dict]) -> list[dict[str, str]]:
+def fixtures_to_payloads(rows: list[dict], *, competition: str = "E0") -> list[dict[str, str]]:
     """Every listed fixture is stored unplayed. Official scores come from results ingest."""
     payloads: list[dict[str, str]] = []
     for row in rows:
         match_date, kickoff = _parse_kickoff(str(row["DateUtc"]))
         payloads.append(
             {
-                "Div": "E0",
+                "Div": competition,
                 "Date": match_date,
                 "Time": kickoff,
                 "HomeTeam": str(row["HomeTeam"]).strip(),
@@ -91,12 +94,11 @@ def ingest_upcoming_fixtures(
     start_year: int | None = None,
     url: str | None = None,
 ) -> dict:
-    if competition not in COMPETITIONS:
-        raise FixtureError(f"Unknown competition {competition}")
+    get_competition(competition)
     year = current_season_start_year() if start_year is None else int(start_year)
-    source_url = url or FIXTURES_URL
+    source_url = url or fixtures_url(competition=competition)
     raw_rows = _download_json(source_url)
-    payloads = fixtures_to_payloads(raw_rows)
+    payloads = fixtures_to_payloads(raw_rows, competition=competition)
     source_file = f"{competition}_{year}-{year + 1}_fixtures.json"
     dest = RAW_DATA_DIR / source_file
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -130,7 +132,7 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    parser = argparse.ArgumentParser(description="Ingest unplayed Premier League fixtures.")
+    parser = argparse.ArgumentParser(description="Ingest unplayed fixtures for one competition.")
     parser.add_argument("--competition", default="E0")
     parser.add_argument("--start-year", type=int, default=None)
     parser.add_argument("--url", default=None)

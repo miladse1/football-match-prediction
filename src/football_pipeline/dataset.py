@@ -9,6 +9,7 @@ from datetime import date
 from pathlib import Path
 
 from football_pipeline.config import ROOT, VALID_END, TRAIN_END, TEST_END, MIN_PRIOR_N
+from football_pipeline.competitions import DEFAULT_COMPETITION
 from football_pipeline.db import connect
 from football_pipeline.splits import ChronoSplit, assert_splits_are_chronological
 
@@ -55,6 +56,7 @@ def assemble_training_rows(
     valid_end: date,
     min_prior_n: int,
     test_end: date | None = None,
+    competition: str = DEFAULT_COMPETITION,
 ) -> dict[str, int]:
     if min_prior_n < 1:
         raise ValueError("min_prior_n must be >= 1 (opening matches have no rolling form)")
@@ -66,15 +68,24 @@ def assemble_training_rows(
     insert_cols = ", ".join(FEATURE_COLUMNS)
     with connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM training_rows")
+            cur.execute(
+                """
+                DELETE FROM training_rows AS tr
+                USING matches AS m, competitions AS c
+                WHERE tr.match_id = m.id
+                  AND m.competition_id = c.id
+                  AND c.code = %s
+                """,
+                (competition,),
+            )
             cur.execute(
                 f"""
                 INSERT INTO training_rows (
-                    match_id, match_date, season_id, result, result_code, split,
+                    match_id, match_date, season_id, competition_id, result, result_code, split,
                     home_prior_n, away_prior_n, {insert_cols}, feature_version
                 )
                 SELECT
-                    m.id, m.match_date, m.season_id, m.result, m.result_code,
+                    m.id, m.match_date, m.season_id, m.competition_id, m.result, m.result_code,
                     CASE
                         WHEN m.match_date <= %s THEN 'train'
                         WHEN m.match_date <= %s THEN 'valid'
@@ -84,7 +95,9 @@ def assemble_training_rows(
                     {feature_sql}, f.feature_version
                 FROM matches AS m
                 JOIN match_features AS f ON f.match_id = m.id
-                WHERE m.is_played
+                JOIN competitions AS c ON c.id = m.competition_id
+                WHERE c.code = %s
+                  AND m.is_played
                   AND m.result_code IS NOT NULL
                   AND f.home_prior_n >= %s
                   AND f.away_prior_n >= %s
@@ -94,22 +107,35 @@ def assemble_training_rows(
                     split.train_end,
                     split.valid_end,
                     split.test_end,
+                    competition,
                     min_prior_n,
                     min_prior_n,
                     split.test_end,
                 ),
             )
             cur.execute(
-                "SELECT match_date, split FROM training_rows ORDER BY match_date, match_id"
+                """
+                SELECT tr.match_date, tr.split
+                FROM training_rows AS tr
+                JOIN matches AS m ON m.id = tr.match_id
+                JOIN competitions AS c ON c.id = m.competition_id
+                WHERE c.code = %s
+                ORDER BY tr.match_date, tr.match_id
+                """,
+                (competition,),
             )
             labelled = list(cur.fetchall())
             assert_splits_are_chronological(labelled)
             cur.execute(
                 """
-                SELECT split, result_code, count(*)
-                FROM training_rows
-                GROUP BY split, result_code
-                """
+                SELECT tr.split, tr.result_code, count(*)
+                FROM training_rows AS tr
+                JOIN matches AS m ON m.id = tr.match_id
+                JOIN competitions AS c ON c.id = m.competition_id
+                WHERE c.code = %s
+                GROUP BY tr.split, tr.result_code
+                """,
+                (competition,),
             )
             classes: dict[str, dict[str, int]] = {}
             for split_name, result_code, n in cur.fetchall():
@@ -117,16 +143,21 @@ def assemble_training_rows(
                 classes.setdefault(split_name, {})[label] = int(n)
             cur.execute(
                 """
-                SELECT split, count(*)
-                FROM training_rows
-                GROUP BY split
-                """
+                SELECT tr.split, count(*)
+                FROM training_rows AS tr
+                JOIN matches AS m ON m.id = tr.match_id
+                JOIN competitions AS c ON c.id = m.competition_id
+                WHERE c.code = %s
+                GROUP BY tr.split
+                """,
+                (competition,),
             )
             counts = {name: n for name, n in cur.fetchall()}
         conn.commit()
 
-    _export_csv()
+    _export_csv(competition=competition)
     summary = {
+        "competition": competition,
         "rows": len(labelled),
         "train": counts.get("train", 0),
         "valid": counts.get("valid", 0),
@@ -151,28 +182,35 @@ def assemble_training_rows(
     return summary
 
 
-def _export_csv() -> None:
-    CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
+def _export_csv(*, competition: str = DEFAULT_COMPETITION) -> None:
+    from football_pipeline.competitions import processed_dir
+
+    dest = processed_dir(competition, root=ROOT) / "training_rows.csv"
+    dest.parent.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT match_id, match_date, split, result_code, home_prior_n, away_prior_n,
+                SELECT tr.match_id, tr.match_date, tr.split, tr.result_code, tr.home_prior_n, tr.away_prior_n,
                        """
-                + ", ".join(FEATURE_COLUMNS)
+                + ", ".join(f"tr.{name}" for name in FEATURE_COLUMNS)
                 + """,
-                       feature_version
-                FROM training_rows
-                ORDER BY match_date, match_id
-                """
+                       tr.feature_version
+                FROM training_rows AS tr
+                JOIN matches AS m ON m.id = tr.match_id
+                JOIN competitions AS c ON c.id = m.competition_id
+                WHERE c.code = %s
+                ORDER BY tr.match_date, tr.match_id
+                """,
+                (competition,),
             )
             columns = [col.name for col in cur.description]
             rows = cur.fetchall()
-    with CSV_PATH.open("w", newline="", encoding="utf-8") as handle:
+    with dest.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(columns)
         writer.writerows(rows)
-    logger.info("Wrote %s", CSV_PATH)
+    logger.info("Wrote %s", dest)
 
 
 def main() -> None:
@@ -190,12 +228,14 @@ def main() -> None:
         default=MIN_PRIOR_N,
         help="Drop matches where either club has fewer than this many prior games",
     )
+    parser.add_argument("--competition", default=DEFAULT_COMPETITION)
     args = parser.parse_args()
     assemble_training_rows(
         train_end=parse_iso_date(args.train_end),
         valid_end=parse_iso_date(args.valid_end),
         test_end=parse_iso_date(args.test_end),
         min_prior_n=args.min_prior_n,
+        competition=args.competition,
     )
 
 

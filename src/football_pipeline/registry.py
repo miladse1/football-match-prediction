@@ -25,12 +25,25 @@ from typing import Any
 
 from football_pipeline.config import ROOT
 from football_pipeline.constants import PRODUCTION_ALGORITHMS
+from football_pipeline.competitions import DEFAULT_COMPETITION, processed_dir
 from football_pipeline.db import connect
 
 logger = logging.getLogger(__name__)
 
 REPORT_PATH = ROOT / "data" / "processed" / "model_metrics.json"
 MODEL_DIR = ROOT / "data" / "processed" / "models"
+
+
+def report_path_for(competition: str = DEFAULT_COMPETITION) -> Path:
+    return processed_dir(competition, root=ROOT) / "model_metrics.json"
+
+
+def _competition_id(code: str) -> int | None:
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM competitions WHERE code = %s", (code,))
+            row = cur.fetchone()
+    return int(row[0]) if row else None
 
 # Report keys carried for backward compatibility, newest first.
 SELECTION_KEYS = (
@@ -68,14 +81,19 @@ def known_algorithms() -> frozenset[str]:
     return PRODUCTION_ALGORITHMS
 
 
-def reported_algorithm(report_path: Path = REPORT_PATH) -> str | None:
+def reported_algorithm(
+    report_path: Path | None = None,
+    *,
+    competition: str = DEFAULT_COMPETITION,
+) -> str | None:
     """Algorithm named by the training report, if it is one we can build."""
-    if not report_path.is_file():
+    path = report_path or report_path_for(competition)
+    if not path.is_file():
         return None
     try:
-        report = json.loads(report_path.read_text(encoding="utf-8"))
+        report = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
-        logger.warning("Ignoring unreadable %s: %s", report_path, exc)
+        logger.warning("Ignoring unreadable %s: %s", path, exc)
         return None
     buildable = known_algorithms()
     for key in SELECTION_KEYS:
@@ -85,48 +103,56 @@ def reported_algorithm(report_path: Path = REPORT_PATH) -> str | None:
     return None
 
 
-def _fetch_run(algorithm: str | None) -> tuple | None:
-    """Newest model_runs row with an artifact, optionally pinned to an algorithm."""
+def _fetch_run(algorithm: str | None, *, competition: str = DEFAULT_COMPETITION) -> tuple | None:
+    """Newest model_runs row with an artifact for this competition."""
+    competition_id = _competition_id(competition)
     with connect() as conn:
         with conn.cursor() as cur:
+            if competition_id is None:
+                return None
             if algorithm:
                 cur.execute(
                     """
                     SELECT id, algorithm, artifact_path, feature_version, trained_at
                     FROM model_runs
-                    WHERE algorithm = %s AND artifact_path IS NOT NULL
+                    WHERE algorithm = %s
+                      AND competition_id = %s
+                      AND artifact_path IS NOT NULL
                     ORDER BY trained_at DESC, id DESC
                     LIMIT 1
                     """,
-                    (algorithm,),
+                    (algorithm, competition_id),
                 )
             else:
                 cur.execute(
                     """
                     SELECT id, algorithm, artifact_path, feature_version, trained_at
                     FROM model_runs
-                    WHERE artifact_path IS NOT NULL
+                    WHERE competition_id = %s AND artifact_path IS NOT NULL
                     ORDER BY trained_at DESC, id DESC
                     LIMIT 1
-                    """
+                    """,
+                    (competition_id,),
                 )
             return cur.fetchone()
 
 
-def production_model() -> ProductionModel:
-    """Resolve the canonical production model, or raise."""
-    preferred = reported_algorithm()
-    row = _fetch_run(preferred)
+def production_model(*, competition: str = DEFAULT_COMPETITION) -> ProductionModel:
+    """Resolve the canonical production model for one competition, or raise."""
+    preferred = reported_algorithm(competition=competition)
+    row = _fetch_run(preferred, competition=competition)
     if row is None and preferred is not None:
         logger.warning(
-            "Report names %s but no model_runs row has an artifact for it; "
-            "falling back to the newest trained run.",
+            "Report names %s for %s but no model_runs row has an artifact for it; "
+            "falling back to the newest trained run in that league.",
             preferred,
+            competition,
         )
-        row = _fetch_run(None)
+        row = _fetch_run(None, competition=competition)
     if row is None:
         raise ProductionModelUnavailable(
-            "No trained production model. Run python -m football_pipeline.train first."
+            f"No trained production model for {competition}. "
+            "Run python -m football_pipeline.train first."
         )
     run_id, algorithm, artifact_path, feature_version, trained_at = row
     return ProductionModel(
@@ -138,12 +164,12 @@ def production_model() -> ProductionModel:
     )
 
 
-def selected_algorithm() -> str:
-    """Name of the production algorithm."""
-    return production_model().algorithm
+def selected_algorithm(*, competition: str = DEFAULT_COMPETITION) -> str:
+    """Name of the production algorithm for one competition."""
+    return production_model(competition=competition).algorithm
 
 
-def load_estimator(model: ProductionModel | None = None):
+def load_estimator(model: ProductionModel | None = None, *, competition: str = DEFAULT_COMPETITION):
     """Load the fitted estimator for the production run.
 
     Reads the path recorded on the run itself. Falls back to the legacy
@@ -152,12 +178,12 @@ def load_estimator(model: ProductionModel | None = None):
     """
     import joblib
 
-    model = model or production_model()
+    model = model or production_model(competition=competition)
     candidates: list[Path] = []
     if model.artifact is not None:
         candidates.append(model.artifact)
     legacy = MODEL_DIR / f"{model.algorithm}.joblib"
-    if legacy not in candidates:
+    if competition == DEFAULT_COMPETITION and legacy not in candidates:
         candidates.append(legacy)
     for path in candidates:
         if path.is_file():
@@ -174,6 +200,12 @@ def load_estimator(model: ProductionModel | None = None):
     )
 
 
-def artifact_path_for_run(algorithm: str, model_run_id: int) -> Path:
+def artifact_path_for_run(
+    algorithm: str,
+    model_run_id: int,
+    *,
+    competition: str = DEFAULT_COMPETITION,
+) -> Path:
     """Stable, unique artifact path for a run. Never overwritten by a later run."""
-    return MODEL_DIR / f"{algorithm}-run{int(model_run_id):05d}.joblib"
+    folder = MODEL_DIR if competition == DEFAULT_COMPETITION else MODEL_DIR / competition
+    return folder / f"{algorithm}-run{int(model_run_id):05d}.joblib"

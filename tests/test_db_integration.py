@@ -123,11 +123,11 @@ def _seed_match(cur, *, home, away, played, match_date=date(2026, 9, 12)):
     for club in (home, away):
         cur.execute(
             """
-            INSERT INTO teams (source_name, canonical_name) VALUES (%s, %s)
-            ON CONFLICT (canonical_name) DO UPDATE SET source_name = teams.source_name
+            INSERT INTO teams (competition_id, source_name, canonical_name) VALUES (%s, %s, %s)
+            ON CONFLICT (competition_id, canonical_name) DO UPDATE SET source_name = teams.source_name
             RETURNING id
             """,
-            (club, club),
+            (competition_id, club, club),
         )
         ids.append(cur.fetchone()[0])
     cur.execute(
@@ -156,12 +156,15 @@ def _seed_match(cur, *, home, away, played, match_date=date(2026, 9, 12)):
 
 
 def _seed_prediction(cur, match_id):
+    cur.execute("SELECT competition_id FROM matches WHERE id = %s", (match_id,))
+    competition_id = cur.fetchone()[0]
     cur.execute(
         """
-        INSERT INTO model_runs (feature_version, algorithm, artifact_path)
-        VALUES ('v2-draw-aware', 'logistic_regression', '/tmp/x.joblib')
+        INSERT INTO model_runs (competition_id, feature_version, algorithm, artifact_path)
+        VALUES (%s, 'v2-draw-aware', 'logistic_regression', '/tmp/x.joblib')
         RETURNING id
-        """
+        """,
+        (competition_id,),
     )
     run_id = cur.fetchone()[0]
     cur.execute(
@@ -228,9 +231,13 @@ def test_probability_sum_constraint_is_enforced(fresh_database):
             match_id, _ = _seed_match(cur, home="Burnley", away="Leeds United", played=False)
             cur.execute(
                 """
-                INSERT INTO model_runs (feature_version, algorithm, artifact_path)
-                VALUES ('v2-draw-aware', 'logistic_regression', '/tmp/x.joblib') RETURNING id
-                """
+                INSERT INTO model_runs (competition_id, feature_version, algorithm, artifact_path)
+                VALUES (
+                    (SELECT competition_id FROM matches WHERE id = %s),
+                    'v2-draw-aware', 'logistic_regression', '/tmp/x.joblib'
+                ) RETURNING id
+                """,
+                (match_id,),
             )
             run_id = cur.fetchone()[0]
             conn.commit()
@@ -266,8 +273,18 @@ def test_argmax_check_matches_numpy_tie_breaking(fresh_database):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO model_runs (feature_version, algorithm, artifact_path)
-                VALUES ('v2-draw-aware', 'uniform', '/tmp/x.joblib') RETURNING id
+                INSERT INTO competitions (code, name, country)
+                VALUES ('E0', 'Premier League', 'England')
+                ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO model_runs (competition_id, feature_version, algorithm, artifact_path)
+                VALUES (
+                    (SELECT id FROM competitions WHERE code = 'E0'),
+                    'v2-draw-aware', 'uniform', '/tmp/x.joblib'
+                ) RETURNING id
                 """
             )
             run_id = cur.fetchone()[0]
@@ -394,3 +411,61 @@ def test_postponement_keeps_frozen_predictions_and_drops_the_date_duplicate(fres
             )
             assert cur.fetchone() == (p_away, p_draw, p_home)
             assert (float(p_away), float(p_draw), float(p_home)) == (0.25, 0.25, 0.50)
+
+
+def test_teams_unique_constraint_is_competition_scoped(fresh_database):
+    with _connect(fresh_database) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT constraint_name
+                FROM information_schema.table_constraints
+                WHERE table_schema = 'public'
+                  AND table_name = 'teams'
+                  AND constraint_type = 'UNIQUE'
+                """
+            )
+            names = {row[0] for row in cur.fetchall()}
+            cur.execute(
+                """
+                SELECT column_name, is_nullable
+                FROM information_schema.columns
+                WHERE table_name = 'teams' AND column_name = 'competition_id'
+                """
+            )
+            column, nullable = cur.fetchone()
+    assert "teams_competition_canonical_unique" in names
+    assert "teams_canonical_name_unique" not in names
+    assert column == "competition_id"
+    assert nullable == "NO"
+
+
+def test_same_club_name_can_exist_in_two_competitions(fresh_database):
+    with _connect(fresh_database) as conn:
+        with conn.cursor() as cur:
+            _seed_match(cur, home="Arsenal", away="Chelsea", played=True)
+            cur.execute(
+                """
+                INSERT INTO competitions (code, name, country)
+                VALUES ('SP1', 'La Liga', 'Spain')
+                RETURNING id
+                """
+            )
+            sp1_id = cur.fetchone()[0]
+            cur.execute(
+                """
+                INSERT INTO teams (competition_id, source_name, canonical_name)
+                VALUES (%s, 'Arsenal', 'Arsenal')
+                RETURNING id
+                """,
+                (sp1_id,),
+            )
+            liga_id = cur.fetchone()[0]
+            cur.execute(
+                "SELECT id, competition_id FROM teams WHERE canonical_name = 'Arsenal' ORDER BY id"
+            )
+            rows = cur.fetchall()
+            conn.commit()
+    assert len(rows) == 2
+    assert liga_id in {row[0] for row in rows}
+    assert {row[1] for row in rows} == {rows[0][1], sp1_id}

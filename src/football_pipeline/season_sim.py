@@ -1,7 +1,8 @@
-"""Monte Carlo Premier League season forecast from frozen 1X2 probabilities.
+"""Monte Carlo season forecast from frozen 1X2 probabilities.
 
 Read-only: never trains a model and never writes to ``predictions``.
 Remaining fixtures are sampled Home/Draw/Away; scorelines are not simulated.
+Each competition is simulated independently from its own remaining fixtures.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from football_pipeline import seasons
+from football_pipeline.competitions import DEFAULT_COMPETITION, get as get_competition, processed_dir
 from football_pipeline.config import ROOT
 from football_pipeline.db import connect
 from football_pipeline.registry import ProductionModelUnavailable, production_model
@@ -40,7 +42,7 @@ TIEBREAK_NOTE = (
     "The production model predicts Home/Draw/Away, not exact scores, so remaining "
     "matches do not update goal difference. After simulated points, ties are broken "
     "by current goal difference from completed matches, then current goals scored, "
-    "then club name. That is a v1 limitation, not a real Premier League tie-break."
+    "then club name. That is a v1 limitation, not a real league tie-break."
 )
 
 EARLY_SEASON_NOTE = (
@@ -171,6 +173,10 @@ def rank_indices(points: np.ndarray, gd: np.ndarray, gf: np.ndarray, names: list
     return np.asarray(order, dtype=int)
 
 
+def artifact_path_for(competition: str = DEFAULT_COMPETITION) -> Path:
+    return processed_dir(competition, root=ROOT) / "season_forecast.json"
+
+
 def simulate_season(
     *,
     teams: list[str],
@@ -178,6 +184,9 @@ def simulate_season(
     remaining: list[RemainingFixture],
     n_sims: int = DEFAULT_N_SIMS,
     seed: int = DEFAULT_SEED,
+    ucl_places: int = 4,
+    europe_places: int = 6,
+    relegation_places: int = 3,
 ) -> dict:
     """Run ``n_sims`` remaining-season paths. Does not mutate ``remaining`` or ``table``."""
     if n_sims < 1:
@@ -213,18 +222,23 @@ def simulate_season(
             sim_points[:, away_idx_arr[fixture_i]] += away_pts[:, fixture_i]
 
     title = np.zeros(n_teams, dtype=np.int32)
-    top4 = np.zeros(n_teams, dtype=np.int32)
+    ucl = np.zeros(n_teams, dtype=np.int32)
+    europe = np.zeros(n_teams, dtype=np.int32)
     relegated = np.zeros(n_teams, dtype=np.int32)
     pos_sum = np.zeros(n_teams, dtype=np.float64)
-    cutoff = max(n_teams - RELEGATION_PLACES, 0)
+    cutoff = max(n_teams - int(relegation_places), 0)
+    ucl_cut = max(int(ucl_places), 0)
+    europe_cut = max(int(europe_places), 0)
     for sim_i in range(n_sims):
         order = rank_indices(sim_points[sim_i], current_gd, current_gf, names)
         for position, team_i in enumerate(order, start=1):
             pos_sum[team_i] += position
             if position == 1:
                 title[team_i] += 1
-            if position <= TOP_FOUR:
-                top4[team_i] += 1
+            if position <= ucl_cut:
+                ucl[team_i] += 1
+            if position <= europe_cut:
+                europe[team_i] += 1
             if position > cutoff:
                 relegated[team_i] += 1
 
@@ -234,6 +248,7 @@ def simulate_season(
     rows = []
     for i, name in enumerate(names):
         title_prob = float(title[i] / n)
+        ucl_prob = float(ucl[i] / n)
         rows.append(
             {
                 "team": name,
@@ -244,7 +259,9 @@ def simulate_season(
                 "current_ga": int(table[name].ga),
                 "current_position": current_position[i],
                 "title_prob": title_prob,
-                "top4_prob": float(top4[i] / n),
+                "ucl_prob": ucl_prob,
+                "top4_prob": ucl_prob,
+                "europe_prob": float(europe[i] / n),
                 "relegation_prob": float(relegated[i] / n),
                 "expected_points": float(sim_points[:, i].mean()),
                 "expected_position": float(pos_sum[i] / n),
@@ -256,17 +273,27 @@ def simulate_season(
         "n_sims": int(n_sims),
         "seed": int(seed),
         "n_teams": n_teams,
+        "ucl_places": int(ucl_places),
+        "europe_places": int(europe_places),
+        "relegation_places": int(relegation_places),
         "teams": rows,
         "title_prob_sum": float(sum(row["title_prob"] for row in rows)),
         "top4_prob_sum": float(sum(row["top4_prob"] for row in rows)),
+        "ucl_prob_sum": float(sum(row["ucl_prob"] for row in rows)),
+        "europe_prob_sum": float(sum(row["europe_prob"] for row in rows)),
         "relegation_prob_sum": float(sum(row["relegation_prob"] for row in rows)),
         "tiebreak": TIEBREAK_NOTE,
     }
 
 
-def load_live_season(*, start_year: int = LIVE_START_YEAR) -> SeasonSnapshot:
+def load_live_season(
+    *,
+    start_year: int = LIVE_START_YEAR,
+    competition: str = DEFAULT_COMPETITION,
+) -> SeasonSnapshot:
     """SELECT-only snapshot of completed results and frozen remaining probabilities."""
-    model = production_model()
+    spec = get_competition(competition)
+    model = production_model(competition=spec.code)
     model_run_id = model.model_run_id
     algorithm = model.algorithm
     feature_version = model.feature_version
@@ -279,12 +306,13 @@ def load_live_season(*, start_year: int = LIVE_START_YEAR) -> SeasonSnapshot:
                        m.home_goals, m.away_goals
                 FROM matches AS m
                 JOIN seasons AS s ON s.id = m.season_id
+                JOIN competitions AS c ON c.id = m.competition_id
                 JOIN teams AS home ON home.id = m.home_team_id
                 JOIN teams AS away ON away.id = m.away_team_id
-                WHERE s.start_year = %s AND m.is_played
+                WHERE c.code = %s AND s.start_year = %s AND m.is_played
                 ORDER BY m.match_date, m.id
                 """,
-                (start_year,),
+                (spec.code, start_year),
             )
             played = [
                 PlayedMatch(home=row[0], away=row[1], home_goals=int(row[2]), away_goals=int(row[3]))
@@ -299,18 +327,20 @@ def load_live_season(*, start_year: int = LIVE_START_YEAR) -> SeasonSnapshot:
                     SELECT home.canonical_name
                     FROM matches AS m
                     JOIN seasons AS s ON s.id = m.season_id
+                    JOIN competitions AS c ON c.id = m.competition_id
                     JOIN teams AS home ON home.id = m.home_team_id
-                    WHERE s.start_year = %s
+                    WHERE c.code = %s AND s.start_year = %s
                     UNION
                     SELECT away.canonical_name
                     FROM matches AS m
                     JOIN seasons AS s ON s.id = m.season_id
+                    JOIN competitions AS c ON c.id = m.competition_id
                     JOIN teams AS away ON away.id = m.away_team_id
-                    WHERE s.start_year = %s
+                    WHERE c.code = %s AND s.start_year = %s
                 ) AS live_teams
                 ORDER BY 1
                 """,
-                (start_year, start_year),
+                (spec.code, start_year, spec.code, start_year),
             )
             teams = [row[0] for row in cur.fetchall()]
 
@@ -320,13 +350,14 @@ def load_live_season(*, start_year: int = LIVE_START_YEAR) -> SeasonSnapshot:
                        p.p_away, p.p_draw, p.p_home, p.created_at
                 FROM matches AS m
                 JOIN seasons AS s ON s.id = m.season_id
+                JOIN competitions AS c ON c.id = m.competition_id
                 JOIN teams AS home ON home.id = m.home_team_id
                 JOIN teams AS away ON away.id = m.away_team_id
                 JOIN predictions AS p ON p.match_id = m.id AND p.model_run_id = %s
-                WHERE s.start_year = %s AND m.is_played = FALSE
+                WHERE c.code = %s AND s.start_year = %s AND m.is_played = FALSE
                 ORDER BY m.match_date, m.id
                 """,
-                (model_run_id, start_year),
+                (model_run_id, spec.code, start_year),
             )
             remaining_rows = cur.fetchall()
             remaining = [
@@ -348,13 +379,14 @@ def load_live_season(*, start_year: int = LIVE_START_YEAR) -> SeasonSnapshot:
                 SELECT COUNT(*)
                 FROM matches AS m
                 JOIN seasons AS s ON s.id = m.season_id
-                WHERE s.start_year = %s AND m.is_played = FALSE
+                JOIN competitions AS c ON c.id = m.competition_id
+                WHERE c.code = %s AND s.start_year = %s AND m.is_played = FALSE
                   AND NOT EXISTS (
                       SELECT 1 FROM predictions AS p
                       WHERE p.match_id = m.id AND p.model_run_id = %s
                   )
                 """,
-                (start_year, model_run_id),
+                (spec.code, start_year, model_run_id),
             )
             missing_remaining = int(cur.fetchone()[0])
 
@@ -389,9 +421,13 @@ def run_live_forecast(
     seed: int = DEFAULT_SEED,
     start_year: int = LIVE_START_YEAR,
     write: bool = True,
+    competition: str = DEFAULT_COMPETITION,
 ) -> dict:
-    snapshot = load_live_season(start_year=start_year)
+    spec = get_competition(competition)
+    snapshot = load_live_season(start_year=start_year, competition=spec.code)
+    dest = artifact_path_for(spec.code)
     cache_key = (
+        spec.code,
         snapshot.model_run_id,
         len(snapshot.played),
         len(snapshot.remaining),
@@ -408,8 +444,13 @@ def run_live_forecast(
         remaining=snapshot.remaining,
         n_sims=n_sims,
         seed=seed,
+        ucl_places=spec.ucl.max_position,
+        europe_places=spec.european_places(),
+        relegation_places=spec.relegation_places,
     )
     payload = {
+        "competition": spec.code,
+        "competition_name": spec.name,
         "live_season": snapshot.season,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "predictions_updated_at": snapshot.predictions_updated_at,
@@ -420,11 +461,15 @@ def run_live_forecast(
         "algorithm": snapshot.algorithm,
         "feature_version": snapshot.feature_version,
         "early_season_note": EARLY_SEASON_NOTE,
+        "qualification_note": spec.qualification_note,
+        "ucl_label": spec.ucl.label,
+        "europa_label": spec.europa.label,
+        "conference_label": spec.conference.label,
         **sim,
     }
     if write:
-        write_artifact(payload)
-        logger.info("Wrote %s (%s sims, seed=%s)", ARTIFACT_PATH, n_sims, seed)
+        write_artifact(payload, dest)
+        logger.info("Wrote %s (%s sims, seed=%s)", dest, n_sims, seed)
     _CACHE[cache_key] = payload
     return payload
 
@@ -443,38 +488,45 @@ def forecast_matches_snapshot(report: dict, snapshot: SeasonSnapshot) -> bool:
         return False
 
 
-def load_dashboard_forecast() -> dict:
+def load_dashboard_forecast(*, competition: str = DEFAULT_COMPETITION) -> dict:
     """Read the pipeline artifact. Never retrains and never writes predictions."""
-    if not ARTIFACT_PATH.is_file():
+    spec = get_competition(competition)
+    path = artifact_path_for(spec.code)
+    if not path.is_file():
         raise ForecastUnavailable(
-            "Season forecast has not been generated yet. Trigger football_match_pipeline in Airflow."
+            f"Season forecast for {spec.name} has not been generated yet. "
+            "Trigger football_match_pipeline in Airflow."
         )
-    report = json.loads(ARTIFACT_PATH.read_text(encoding="utf-8"))
+    report = json.loads(path.read_text(encoding="utf-8"))
     try:
-        snapshot = load_live_season()
+        snapshot = load_live_season(competition=spec.code)
     except ProductionModelUnavailable as exc:
         raise ForecastUnavailable(
-            "Season forecast is unavailable because no trained model is registered. "
-            "Trigger football_match_pipeline in Airflow."
+            f"Season forecast for {spec.name} is unavailable because no trained model "
+            "is registered. Trigger football_match_pipeline in Airflow."
         ) from exc
     if not forecast_matches_snapshot(report, snapshot):
         raise ForecastUnavailable(
-            "Season forecast is out of date because the last pipeline run did not "
-            "finish the forecast step. Trigger football_match_pipeline again."
+            f"Season forecast for {spec.name} is out of date because the last pipeline "
+            "run did not finish the forecast step. Trigger football_match_pipeline again."
         )
     report.setdefault("early_season_note", EARLY_SEASON_NOTE)
+    report.setdefault("qualification_note", spec.qualification_note)
+    report.setdefault("competition", spec.code)
+    report.setdefault("competition_name", spec.name)
     return report
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     parser = argparse.ArgumentParser(
-        description="Simulate the remainder of the live Premier League season from frozen probabilities."
+        description="Simulate the remainder of the live season from frozen probabilities."
     )
     parser.add_argument("--n-sims", type=int, default=DEFAULT_N_SIMS)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument("--competition", default=DEFAULT_COMPETITION)
     args = parser.parse_args()
-    payload = run_live_forecast(n_sims=args.n_sims, seed=args.seed)
+    payload = run_live_forecast(n_sims=args.n_sims, seed=args.seed, competition=args.competition)
     top = payload["teams"][:5]
     print(
         json.dumps(

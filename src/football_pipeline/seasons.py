@@ -1,6 +1,6 @@
 """Single source of truth for season boundaries and every time window.
 
-A Premier League season runs August to July, so it crosses the calendar year:
+Top-5 league seasons run August to July, so they cross the calendar year:
 7 Sep 2026 and 15 May 2027 are both the 2026/27 season (start year 2026).
 
 Everything downstream is derived from one fact -- which season contains "today":
@@ -32,6 +32,7 @@ DEFAULT_WALKFORWARD_FOLDS = 4
 # season that leaves fewer than this many complete seasons behind it.
 MIN_TRAIN_SEASONS = 2
 
+# Premier League default; other leagues use competitions.fixtures_url_template.
 FIXTURES_URL_TEMPLATE = "https://fixturedownload.com/feed/json/epl-{start_year}"
 
 
@@ -136,8 +137,17 @@ def walkforward_valid_years(
     return tuple(range(first, holdout))
 
 
-def fixtures_url(today: date | None = None, *, template: str = FIXTURES_URL_TEMPLATE) -> str:
-    """Fixture feed for the live season."""
+def fixtures_url(
+    today: date | None = None,
+    *,
+    competition: str = "E0",
+    template: str | None = None,
+) -> str:
+    """Fixture feed for the live season of one competition."""
+    if template is None:
+        from football_pipeline.competitions import fixtures_url_template
+
+        template = fixtures_url_template(competition)
     return template.format(start_year=live_season_start_year(today))
 
 
@@ -158,5 +168,5 @@ def season_windows(today: date | None = None) -> dict:
         "valid_end": valid_end(today).isoformat(),
         "test_end": test_end(today).isoformat(),
         "walkforward_valid_seasons": [short_season_name(year) for year in valid_years],
-        "fixtures_url": fixtures_url(today),
+        "fixtures_url": fixtures_url(today, competition="E0"),
     }

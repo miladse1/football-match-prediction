@@ -15,31 +15,40 @@ from football_pipeline.spark_features import build_feature_frame, spark_session
 logger = logging.getLogger(__name__)
 
 
-def fetch_matches() -> list[dict[str, Any]]:
+def fetch_matches(*, competition: str | None = None) -> list[dict[str, Any]]:
+    league_sql = ""
+    params: tuple = ()
+    if competition:
+        league_sql = "JOIN competitions AS c ON c.id = m.competition_id WHERE c.code = %s"
+        params = (competition,)
     with connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT id, match_date, kickoff_time, home_team_id, away_team_id,
-                       home_goals, away_goals, result, is_played
-                FROM matches
-                ORDER BY match_date, kickoff_time, id
-                """
+                f"""
+                SELECT m.id, m.competition_id, m.match_date, m.kickoff_time,
+                       m.home_team_id, m.away_team_id,
+                       m.home_goals, m.away_goals, m.result, m.is_played
+                FROM matches AS m
+                {league_sql}
+                ORDER BY m.match_date, m.kickoff_time, m.id
+                """,
+                params,
             )
             rows = []
             for rec in cur.fetchall():
-                kickoff = rec[2]
+                kickoff = rec[3]
                 rows.append(
                     {
                         "match_id": rec[0],
-                        "match_date": rec[1] if isinstance(rec[1], date) else rec[1],
+                        "competition_id": rec[1],
+                        "match_date": rec[2] if isinstance(rec[2], date) else rec[2],
                         "kickoff_time": kickoff.strftime("%H:%M:%S") if isinstance(kickoff, time) else (str(kickoff) if kickoff else ""),
-                        "home_team_id": rec[3],
-                        "away_team_id": rec[4],
-                        "home_goals": rec[5],
-                        "away_goals": rec[6],
-                        "result": rec[7],
-                        "is_played": rec[8],
+                        "home_team_id": rec[4],
+                        "away_team_id": rec[5],
+                        "home_goals": rec[6],
+                        "away_goals": rec[7],
+                        "result": rec[8],
+                        "is_played": rec[9],
                     }
                 )
             return rows
@@ -72,8 +81,8 @@ def _row_to_record(row) -> dict[str, Any]:
     return data
 
 
-def build_and_store() -> int:
-    rows = fetch_matches()
+def build_and_store(*, competition: str | None = None) -> int:
+    rows = fetch_matches(competition=competition)
     if not any(row.get("is_played") for row in rows):
         raise RuntimeError("No played matches in Postgres. Run ingest + load_matches first.")
 
@@ -94,8 +103,10 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    argparse.ArgumentParser(description="Build pre-match features with Spark.").parse_args()
-    build_and_store()
+    parser = argparse.ArgumentParser(description="Build pre-match features with Spark.")
+    parser.add_argument("--competition", default=None, help="Limit to one competition code, e.g. E0")
+    args = parser.parse_args()
+    build_and_store(competition=args.competition)
 
 
 if __name__ == "__main__":

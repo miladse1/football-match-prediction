@@ -23,6 +23,12 @@ from football_dashboard.formatters import (
     result_side_label,
 )
 from football_pipeline import seasons
+from football_pipeline.competitions import (
+    DEFAULT_COMPETITION,
+    get as get_competition,
+    processed_dir,
+    public_catalog,
+)
 from football_pipeline.config import INGEST_START_YEAR, ROOT
 from football_pipeline.db import connect
 from football_pipeline.registry import production_model as _registry_production_model
@@ -33,9 +39,9 @@ LIVE_START_YEAR = seasons.live_season_start_year()
 LIVE_SEASON = seasons.short_season_name(LIVE_START_YEAR)
 
 
-def _selected_algorithm() -> str:
+def _selected_algorithm(competition: str = DEFAULT_COMPETITION) -> str:
     """Production algorithm name. Resolved by football_pipeline.registry."""
-    return _registry_production_model().algorithm
+    return _registry_production_model(competition=competition).algorithm
 
 
 def _iso_date(value) -> str | None:
@@ -112,9 +118,17 @@ def _serialize_fixture(row: dict, *, include_result: bool, include_prediction: b
     return payload
 
 
-def production_model() -> dict:
+def competitions_payload() -> dict:
+    return {
+        "default": DEFAULT_COMPETITION,
+        "competitions": public_catalog(),
+    }
+
+
+def production_model(*, competition: str = DEFAULT_COMPETITION) -> dict:
     """Dashboard view of the canonical production model. Same keys as before."""
-    model = _registry_production_model()
+    model = _registry_production_model(competition=competition)
+    spec = get_competition(competition)
     return {
         "model_run_id": model.model_run_id,
         "algorithm": model.algorithm,
@@ -122,23 +136,27 @@ def production_model() -> dict:
         "feature_version": model.feature_version,
         "trained_at": _iso_stamp(model.trained_at),
         "artifact_path": model.artifact_path,
+        "competition": spec.as_public_dict(),
     }
 
 
-def list_teams() -> list[str]:
+def list_teams(*, competition: str = DEFAULT_COMPETITION) -> list[str]:
     with connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT canonical_name
-                FROM teams
-                ORDER BY canonical_name
-                """
+                SELECT DISTINCT t.canonical_name
+                FROM teams AS t
+                JOIN competitions AS c ON c.id = t.competition_id
+                WHERE c.code = %s
+                ORDER BY t.canonical_name
+                """,
+                (competition,),
             )
             return [row[0] for row in cur.fetchall()]
 
 
-def latest_completed_match() -> dict | None:
+def latest_completed_match(*, competition: str = DEFAULT_COMPETITION) -> dict | None:
     with connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -146,12 +164,14 @@ def latest_completed_match() -> dict | None:
                 SELECT m.match_date, m.kickoff_time, m.home_goals, m.away_goals,
                        home.canonical_name, away.canonical_name, m.result
                 FROM matches AS m
+                JOIN competitions AS c ON c.id = m.competition_id
                 JOIN teams AS home ON home.id = m.home_team_id
                 JOIN teams AS away ON away.id = m.away_team_id
-                WHERE m.is_played
+                WHERE m.is_played AND c.code = %s
                 ORDER BY m.match_date DESC, m.kickoff_time DESC NULLS LAST, m.id DESC
                 LIMIT 1
-                """
+                """,
+                (competition,),
             )
             row = cur.fetchone()
     if not row:
@@ -170,18 +190,33 @@ def latest_completed_match() -> dict | None:
     }
 
 
-def predictions_updated_at() -> str | None:
+def predictions_updated_at(*, competition: str = DEFAULT_COMPETITION) -> str | None:
     with connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT MAX(created_at) FROM predictions")
+            cur.execute(
+                """
+                SELECT MAX(p.created_at)
+                FROM predictions AS p
+                JOIN matches AS m ON m.id = p.match_id
+                JOIN competitions AS c ON c.id = m.competition_id
+                WHERE c.code = %s
+                """,
+                (competition,),
+            )
             row = cur.fetchone()
     return _iso_stamp(row[0]) if row and row[0] else None
 
 
-def upcoming_fixtures(*, team: str | None = None, date_from: str | None = None, date_to: str | None = None) -> list[dict]:
-    model = production_model()
-    clauses = ["m.is_played = FALSE", "p.model_run_id = %s"]
-    params: list = [model["model_run_id"]]
+def upcoming_fixtures(
+    *,
+    team: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    competition: str = DEFAULT_COMPETITION,
+) -> list[dict]:
+    model = production_model(competition=competition)
+    clauses = ["m.is_played = FALSE", "p.model_run_id = %s", "c.code = %s"]
+    params: list = [model["model_run_id"], competition]
     if team:
         clauses.append("(home.canonical_name = %s OR away.canonical_name = %s)")
         params.extend([team, team])
@@ -202,6 +237,7 @@ def upcoming_fixtures(*, team: str | None = None, date_from: str | None = None, 
                        p.p_away, p.p_draw, p.p_home, p.predicted_class, p.created_at AS predicted_at,
                        r.algorithm, r.feature_version
                 FROM matches AS m
+                JOIN competitions AS c ON c.id = m.competition_id
                 JOIN predictions AS p ON p.match_id = m.id
                 JOIN model_runs AS r ON r.id = p.model_run_id
                 JOIN teams AS home ON home.id = m.home_team_id
@@ -221,11 +257,12 @@ def settled_live_fixtures(
     team: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    competition: str = DEFAULT_COMPETITION,
 ) -> list[dict]:
     """Played live-season matches that still have a frozen pre-match prediction."""
-    algorithm = _selected_algorithm()
-    clauses = ["m.is_played", "s.start_year = %s", "r.algorithm = %s"]
-    params: list = [LIVE_START_YEAR, algorithm]
+    algorithm = _selected_algorithm(competition)
+    clauses = ["m.is_played", "s.start_year = %s", "r.algorithm = %s", "c.code = %s"]
+    params: list = [LIVE_START_YEAR, algorithm, competition]
     if team:
         clauses.append("(home.canonical_name = %s OR away.canonical_name = %s)")
         params.extend([team, team])
@@ -249,6 +286,7 @@ def settled_live_fixtures(
                        r.algorithm, r.feature_version
                 FROM matches AS m
                 JOIN seasons AS s ON s.id = m.season_id
+                JOIN competitions AS c ON c.id = m.competition_id
                 JOIN predictions AS p ON p.match_id = m.id
                 JOIN model_runs AS r ON r.id = p.model_run_id
                 JOIN teams AS home ON home.id = m.home_team_id
@@ -299,20 +337,22 @@ def _class_slice(settled: list[dict], key: str) -> dict:
     return out
 
 
-def overview_payload() -> dict:
-    model = production_model()
-    upcoming = upcoming_fixtures()
-    settled = settled_live_fixtures()
+def overview_payload(*, competition: str = DEFAULT_COMPETITION) -> dict:
+    spec = get_competition(competition)
+    model = production_model(competition=competition)
+    upcoming = upcoming_fixtures(competition=competition)
+    settled = settled_live_fixtures(competition=competition)
     return {
         "model": model,
+        "competition": spec.as_public_dict(),
         "live_season": LIVE_SEASON,
-        "predictions_updated_at": predictions_updated_at(),
-        "latest_completed_match": latest_completed_match(),
+        "predictions_updated_at": predictions_updated_at(competition=competition),
+        "latest_completed_match": latest_completed_match(competition=competition),
         "live_scorecard": live_scorecard(settled),
         "n_upcoming": len(upcoming),
         "n_settled": len(settled),
         "next_upcoming": upcoming[:8],
-        "teams": list_teams(),
+        "teams": list_teams(competition=competition),
     }
 
 
@@ -323,14 +363,17 @@ def upcoming_payload(
     date_to: str | None = None,
     page: int = 1,
     page_size: int = 16,
+    competition: str = DEFAULT_COMPETITION,
 ) -> dict:
-    model = production_model()
-    rows = upcoming_fixtures(team=team, date_from=date_from, date_to=date_to)
+    spec = get_competition(competition)
+    model = production_model(competition=competition)
+    rows = upcoming_fixtures(team=team, date_from=date_from, date_to=date_to, competition=competition)
     page_data = paginate(rows, page=page, page_size=page_size)
     return {
         "model": model,
+        "competition": spec.as_public_dict(),
         "live_season": LIVE_SEASON,
-        "teams": list_teams(),
+        "teams": list_teams(competition=competition),
         "page": page_data["page"],
         "page_size": page_data["page_size"],
         "total": page_data["total"],
@@ -346,14 +389,17 @@ def results_payload(
     date_to: str | None = None,
     page: int = 1,
     page_size: int = 16,
+    competition: str = DEFAULT_COMPETITION,
 ) -> dict:
-    model = production_model()
-    rows = settled_live_fixtures(team=team, date_from=date_from, date_to=date_to)
+    spec = get_competition(competition)
+    model = production_model(competition=competition)
+    rows = settled_live_fixtures(team=team, date_from=date_from, date_to=date_to, competition=competition)
     page_data = paginate(rows, page=page, page_size=page_size)
     return {
         "model": model,
+        "competition": spec.as_public_dict(),
         "live_season": LIVE_SEASON,
-        "teams": list_teams(),
+        "teams": list_teams(competition=competition),
         "page": page_data["page"],
         "page_size": page_data["page_size"],
         "total": page_data["total"],
@@ -362,7 +408,7 @@ def results_payload(
     }
 
 
-def forecast_payload() -> dict:
+def forecast_payload(*, competition: str = DEFAULT_COMPETITION) -> dict:
     """Read the pipeline-generated forecast. Does not retrain or resimulate.
 
     Team rows are enriched with a display crest so the dashboard can render a
@@ -371,12 +417,14 @@ def forecast_payload() -> dict:
     """
     from football_pipeline.season_sim import load_dashboard_forecast
 
-    model = production_model()
-    report = load_dashboard_forecast()
+    spec = get_competition(competition)
+    model = production_model(competition=competition)
+    report = load_dashboard_forecast(competition=competition)
     return {
         "model": model,
         "live_season": LIVE_SEASON,
         **report,
+        "competition": spec.as_public_dict(),
         "teams": with_team_crests(report.get("teams") or []),
     }
 
@@ -386,18 +434,20 @@ def with_team_crests(rows: list[dict]) -> list[dict]:
     return [{**row, "crest": team_badge(row["team"])} for row in rows]
 
 
-def performance_payload() -> dict:
-    settled = settled_live_fixtures()
+def performance_payload(*, competition: str = DEFAULT_COMPETITION) -> dict:
+    spec = get_competition(competition)
+    settled = settled_live_fixtures(competition=competition)
     score = live_scorecard(settled)
     return {
-        "model": production_model(),
+        "model": production_model(competition=competition),
+        "competition": spec.as_public_dict(),
         "live_season": LIVE_SEASON,
         "live_scorecard": score,
         "n_settled": score["n"],
     }
 
 
-def live_table_positions() -> dict[str, dict]:
+def live_table_positions(*, competition: str = DEFAULT_COMPETITION) -> dict[str, dict]:
     """Current live-season table from played matches. Display only; not used in training."""
     with connect() as conn:
         with conn.cursor() as cur:
@@ -408,11 +458,12 @@ def live_table_positions() -> dict[str, dict]:
                        m.home_goals, m.away_goals
                 FROM matches AS m
                 JOIN seasons AS s ON s.id = m.season_id
+                JOIN competitions AS c ON c.id = m.competition_id
                 JOIN teams AS home ON home.id = m.home_team_id
                 JOIN teams AS away ON away.id = m.away_team_id
-                WHERE m.is_played AND s.start_year = %s
+                WHERE m.is_played AND s.start_year = %s AND c.code = %s
                 """,
-                (LIVE_START_YEAR,),
+                (LIVE_START_YEAR, competition),
             )
             played = cur.fetchall()
             cur.execute(
@@ -421,9 +472,10 @@ def live_table_positions() -> dict[str, dict]:
                 FROM teams AS t
                 JOIN matches AS m ON m.home_team_id = t.id OR m.away_team_id = t.id
                 JOIN seasons AS s ON s.id = m.season_id
-                WHERE s.start_year = %s
+                JOIN competitions AS c ON c.id = m.competition_id
+                WHERE s.start_year = %s AND c.code = %s
                 """,
-                (LIVE_START_YEAR,),
+                (LIVE_START_YEAR, competition),
             )
             teams = [row[0] for row in cur.fetchall()]
     table = {
@@ -507,6 +559,9 @@ def prior_head_to_head(
                 WHERE m.is_played
                   AND m.id <> %s
                   AND m.match_date < %s
+                  AND m.competition_id = (
+                      SELECT competition_id FROM matches WHERE id = %s
+                  )
                   AND (
                         (m.home_team_id = %s AND m.away_team_id = %s)
                      OR (m.home_team_id = %s AND m.away_team_id = %s)
@@ -517,6 +572,7 @@ def prior_head_to_head(
                 (
                     fixture_match_id,
                     fixture_date,
+                    fixture_match_id,
                     home_team_id,
                     away_team_id,
                     away_team_id,
@@ -537,8 +593,8 @@ def prior_head_to_head(
     return [_serialize_h2h(row) for row in filtered]
 
 
-def _apply_table_ranks(fixture: dict) -> None:
-    positions = live_table_positions()
+def _apply_table_ranks(fixture: dict, *, competition: str = DEFAULT_COMPETITION) -> None:
+    positions = live_table_positions(competition=competition)
     home_table = positions.get(fixture["home_team"])
     away_table = positions.get(fixture["away_team"])
     fixture["home_position"] = None if home_table is None else home_table["position"]
@@ -549,7 +605,23 @@ def _apply_table_ranks(fixture: dict) -> None:
 
 def match_detail_payload(match_id: int) -> dict | None:
     """Upcoming or completed match detail. Reads stored rows only; does not score or retrain."""
-    model = production_model()
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT c.code
+                FROM matches AS m
+                JOIN competitions AS c ON c.id = m.competition_id
+                WHERE m.id = %s
+                """,
+                (match_id,),
+            )
+            found = cur.fetchone()
+    if not found:
+        return None
+    competition = found[0]
+    spec = get_competition(competition)
+    model = production_model(competition=competition)
     with connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -561,6 +633,7 @@ def match_detail_payload(match_id: int) -> dict | None:
                        home.canonical_name AS home_team,
                        away.canonical_name AS away_team,
                        c.name AS competition_name,
+                       c.code AS competition_code,
                        pred.p_away, pred.p_draw, pred.p_home, pred.predicted_class, pred.predicted_at,
                        pred.algorithm, pred.feature_version,
                        raw.payload
@@ -608,12 +681,14 @@ def match_detail_payload(match_id: int) -> dict | None:
         include_prediction=(not played) or live_settled,
     )
     fixture["competition"] = competition_label(row.get("competition_name"))
+    fixture["competition_code"] = row.get("competition_code") or competition
     fixture["status"] = "Full-time" if played else "Upcoming"
-    _apply_table_ranks(fixture)
+    _apply_table_ranks(fixture, competition=competition)
     stats = extract_match_stats(row.get("payload")) if played else []
     payload = {
         "kind": "result" if played else "upcoming",
         "model": model,
+        "competition": spec.as_public_dict(),
         "live_season": LIVE_SEASON,
         "match": fixture,
         "timeline_available": False,
@@ -637,17 +712,20 @@ def match_detail_payload(match_id: int) -> dict | None:
     return payload
 
 
-def about_payload() -> dict:
+def about_payload(*, competition: str = DEFAULT_COMPETITION) -> dict:
+    spec = get_competition(competition)
+    folder = processed_dir(competition, root=ROOT)
+    report_path = folder / "model_metrics.json"
     report = {}
-    if REPORT_PATH.is_file():
-        report = json.loads(REPORT_PATH.read_text(encoding="utf-8"))
-    test_path = ROOT / "data" / "processed" / "final_test_metrics.json"
+    if report_path.is_file():
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    test_path = folder / "final_test_metrics.json"
     test_report = json.loads(test_path.read_text(encoding="utf-8")) if test_path.is_file() else {}
     test = test_report.get("test") or report.get("test_holdout") or {}
     walk = (report.get("walkforward") or {}).get("summary") or {}
     selected = report.get("selected_by_walkforward_log_loss") or "logistic_regression"
     selected_stats = (walk.get(selected) or {}).get("mean") or {}
-    model = production_model()
+    model = production_model(competition=competition)
     holdout_year = seasons.holdout_season_start_year()
     holdout_season = seasons.short_season_name(holdout_year)
     last_train_season = seasons.short_season_name(holdout_year - 1)
@@ -659,6 +737,7 @@ def about_payload() -> dict:
     ingest_season = seasons.short_season_name(INGEST_START_YEAR)
     return {
         "model": model,
+        "competition": spec.as_public_dict(),
         "selection_reason": report.get("selection_reason"),
         "walkforward_folds": (report.get("walkforward") or {}).get("folds") or [],
         "walkforward_mean_log_loss": selected_stats.get("log_loss"),
@@ -691,7 +770,7 @@ def about_payload() -> dict:
             "The current match never enters its own form, Elo, or head-to-head window."
         ),
         "history": {
-            "ingest": f"Premier League results from {ingest_season} through the current season",
+            "ingest": f"{spec.name} results from {ingest_season} through the current season",
             "walkforward": (
                 f"Expanding-window selection on {fold_span}, training through the "
                 "previous season each time"

@@ -87,9 +87,16 @@ def ordinal(value: int | None) -> str | None:
 
 def competition_label(name: str | None) -> str:
     text = (name or "").strip() or "Premier League"
-    if text.casefold() in {"english premier league", "e0"}:
-        return "Premier League"
-    return text
+    folded = text.casefold()
+    aliases = {
+        "english premier league": "Premier League",
+        "e0": "Premier League",
+        "sp1": "La Liga",
+        "d1": "Bundesliga",
+        "i1": "Serie A",
+        "f1": "Ligue 1",
+    }
+    return aliases.get(folded, text)
 
 
 def result_side_label(result_code: int | None) -> str | None:

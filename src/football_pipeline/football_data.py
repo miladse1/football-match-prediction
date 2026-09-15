@@ -45,7 +45,7 @@ def season_name(start_year: int) -> str:
 
 
 def current_season_start_year(today: date | None = None) -> int:
-    """Start year of the Premier League season that contains `today`.
+    """Start year of the August–July season that contains `today`.
 
     Thin alias kept for callers and tests. The rule itself lives in
     football_pipeline.seasons, which is the single source of truth for every
@@ -89,7 +89,7 @@ def resolve_ingest_end_year(
     today: date | None = None,
     env_default: int | None = None,
 ) -> int:
-    """End season start year to ingest. Empty/`auto` means the current PL season."""
+    """End season start year to ingest. Empty/`auto` means the current live season."""
     parsed = parse_year_override(value)
     if parsed is not None:
         return parsed
@@ -106,10 +106,9 @@ def resolve_from_file(value: object) -> str | None:
 
 
 def resolve_competition(value: object, *, default: str = "E0") -> str:
-    if value is None:
-        return default
-    text = str(value).strip()
-    return text or default
+    from football_pipeline.competitions import parse_competition
+
+    return parse_competition(value, default=default)
 
 
 def season_csv_url(competition_code: str, start_year: int, *, base: str | None = None) -> str:

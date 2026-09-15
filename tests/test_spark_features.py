@@ -135,3 +135,33 @@ def test_elo_updates_only_after_kickoff():
     assert elo[1] == (1500.0, 1500.0)
     assert elo[2][0] != 1500.0
     assert elo[2][0] == elo_before_matches(rows + [_match(3, 26, 1, 4, 9, 0, "H")])[2][0]
+
+
+def test_features_do_not_leak_across_competitions(spark):
+    """Same numeric team ids in two leagues must not share Elo, form, or H2H."""
+    pl = [
+        _match(1, 12, 1, 2, 7, 0, "H"),
+        _match(2, 19, 1, 3, 1, 0, "H"),
+    ]
+    for row in pl:
+        row["competition_id"] = 10
+    liga = {
+        "match_id": 3,
+        "match_date": date(2023, 8, 26),
+        "kickoff_time": "15:00:00",
+        "home_team_id": 1,
+        "away_team_id": 4,
+        "home_goals": 0,
+        "away_goals": 0,
+        "result": "D",
+        "is_played": True,
+        "competition_id": 20,
+    }
+    out = {row.match_id: row for row in build_feature_frame(spark, pl + [liga]).collect()}
+    assert out[3].home_prior_n == 0
+    assert out[3].home_win_rate_l5 is None
+    assert out[3].home_elo == 1500.0
+    assert out[3].h2h_home_win_rate_n is None
+    assert out[2].home_prior_n == 1
+    assert out[2].home_goals_scored_avg_l5 == pytest.approx(7.0)
+

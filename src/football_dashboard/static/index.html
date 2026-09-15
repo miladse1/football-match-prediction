@@ -5,14 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#0a0d0a" />
-    <title>MatchLab · Premier League predictions</title>
+    <title>MatchLab · Top 5 league predictions</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Familjen+Grotesk:wght@500;600;700&display=swap"
     />
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=top5" />
   </head>
   <body>
     <a class="skip-link" href="#view">Skip to content</a>
@@ -36,6 +36,25 @@
           <a href="/about" data-link data-nav="/about">The model</a>
         </nav>
       </div>
+      <div class="league-bar">
+        <nav class="league-switch" id="league-switch" aria-label="Competition">
+          <a href="/?league=E0" data-link data-league="E0" class="league-chip">
+            <span class="league-mark">PL</span><span>Premier League</span>
+          </a>
+          <a href="/?league=SP1" data-link data-league="SP1" class="league-chip">
+            <span class="league-mark">LL</span><span>La Liga</span>
+          </a>
+          <a href="/?league=D1" data-link data-league="D1" class="league-chip">
+            <span class="league-mark">BL</span><span>Bundesliga</span>
+          </a>
+          <a href="/?league=I1" data-link data-league="I1" class="league-chip">
+            <span class="league-mark">SA</span><span>Serie A</span>
+          </a>
+          <a href="/?league=F1" data-link data-league="F1" class="league-chip">
+            <span class="league-mark">L1</span><span>Ligue 1</span>
+          </a>
+        </nav>
+      </div>
     </header>
 
     <main id="view" class="view" tabindex="-1">
@@ -48,13 +67,13 @@
     <footer class="sitefoot">
       <div class="sitefoot-inner">
         <p>
-          <strong>MatchLab</strong> · Premier League Home / Draw / Away probabilities from a
-          leakage-safe walk-forward model.
+          <strong>MatchLab</strong> · Home / Draw / Away probabilities for the top five
+          European leagues from leakage-safe walk-forward models.
         </p>
         <p class="sitefoot-meta" id="foot-meta"></p>
       </div>
     </footer>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=top5"></script>
   </body>
 </html>

@@ -168,6 +168,59 @@ a {
   min-height: 62px;
 }
 
+.league-bar {
+  max-width: var(--shell);
+  margin: 0 auto;
+  padding: 0 var(--sp-5) 10px;
+}
+
+.league-switch {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding-bottom: 2px;
+}
+.league-switch::-webkit-scrollbar {
+  display: none;
+}
+
+.league-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  text-decoration: none;
+  color: var(--ink-3);
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 5px 10px 5px 6px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line);
+  background: var(--s1);
+  white-space: nowrap;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+.league-chip:hover {
+  color: var(--ink);
+  border-color: var(--ink-4, var(--line));
+}
+.league-chip.is-active {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.league-mark {
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-display);
+  font-size: 0.62rem;
+  letter-spacing: 0.02em;
+  background: color-mix(in srgb, currentColor 16%, transparent);
+}
+
 .brand {
   display: flex;
   align-items: center;

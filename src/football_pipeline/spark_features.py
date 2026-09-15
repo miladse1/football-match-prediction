@@ -28,8 +28,18 @@ MATCH_ROW_SCHEMA = StructType(
         StructField("away_goals", IntegerType(), True),
         StructField("result", StringType(), True),
         StructField("is_played", BooleanType(), False),
+        StructField("competition_id", LongType(), False),
     ]
 )
+
+def _with_competition(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalised = []
+    for row in rows:
+        item = dict(row)
+        item["competition_id"] = int(item.get("competition_id") or 0)
+        normalised.append(item)
+    return normalised
+
 
 ELO_START = 1500.0
 ELO_K = 20.0
@@ -52,6 +62,7 @@ def spark_session(app_name: str = "football-match-features") -> SparkSession:
 def _team_match_grain(played: DataFrame) -> DataFrame:
     home = played.select(
         "match_id",
+        "competition_id",
         "match_date",
         "kickoff_time",
         F.col("home_team_id").alias("team_id"),
@@ -61,6 +72,7 @@ def _team_match_grain(played: DataFrame) -> DataFrame:
     )
     away = played.select(
         "match_id",
+        "competition_id",
         "match_date",
         "kickoff_time",
         F.col("away_team_id").alias("team_id"),
@@ -87,7 +99,7 @@ def add_rolling_form(played: DataFrame) -> DataFrame:
     """Last-5 (or fewer) played matches for each club, excluding the current row."""
     grain = _team_match_grain(played)
     by_team = (
-        Window.partitionBy("team_id")
+        Window.partitionBy("competition_id", "team_id")
         .orderBy("match_date", "kickoff_time", "match_id")
         .rowsBetween(-5, -1)
     )
@@ -103,7 +115,7 @@ def add_rolling_form(played: DataFrame) -> DataFrame:
     )
 
     venue = (
-        Window.partitionBy("team_id", "is_home")
+        Window.partitionBy("competition_id", "team_id", "is_home")
         .orderBy("match_date", "kickoff_time", "match_id")
         .rowsBetween(-5, -1)
     )
@@ -146,6 +158,7 @@ def add_rolling_form(played: DataFrame) -> DataFrame:
 def _targets_long(matches: DataFrame) -> DataFrame:
     home = matches.select(
         "match_id",
+        "competition_id",
         "match_date",
         "kickoff_time",
         F.col("home_team_id").alias("team_id"),
@@ -153,6 +166,7 @@ def _targets_long(matches: DataFrame) -> DataFrame:
     )
     away = matches.select(
         "match_id",
+        "competition_id",
         "match_date",
         "kickoff_time",
         F.col("away_team_id").alias("team_id"),
@@ -181,7 +195,10 @@ def add_upcoming_form(upcoming: DataFrame, played: DataFrame) -> DataFrame:
     def last5(extra_join):
         inner = targets.join(
             history,
-            (F.col("t.team_id") == F.col("h.team_id")) & extra_join & _earlier("t", "h"),
+            (F.col("t.competition_id") == F.col("h.competition_id"))
+            & (F.col("t.team_id") == F.col("h.team_id"))
+            & extra_join
+            & _earlier("t", "h"),
             how="inner",
         )
         return inner.withColumn("rn", F.row_number().over(recency)).filter(F.col("rn") <= 5)
@@ -264,11 +281,15 @@ def add_head_to_head(current: DataFrame, history: DataFrame | None = None) -> Da
     current = current.alias("c")
     history = history.alias("h")
     same_pair = (
-        F.least(F.col("c.home_team_id"), F.col("c.away_team_id"))
-        == F.least(F.col("h.home_team_id"), F.col("h.away_team_id"))
-    ) & (
-        F.greatest(F.col("c.home_team_id"), F.col("c.away_team_id"))
-        == F.greatest(F.col("h.home_team_id"), F.col("h.away_team_id"))
+        (F.col("c.competition_id") == F.col("h.competition_id"))
+        & (
+            F.least(F.col("c.home_team_id"), F.col("c.away_team_id"))
+            == F.least(F.col("h.home_team_id"), F.col("h.away_team_id"))
+        )
+        & (
+            F.greatest(F.col("c.home_team_id"), F.col("c.away_team_id"))
+            == F.greatest(F.col("h.home_team_id"), F.col("h.away_team_id"))
+        )
     )
     strictly_earlier = (F.col("h.match_date") < F.col("c.match_date")) | (
         (F.col("h.match_date") == F.col("c.match_date"))
@@ -300,18 +321,25 @@ def add_head_to_head(current: DataFrame, history: DataFrame | None = None) -> Da
 
 
 def elo_before_matches(rows: Sequence[dict[str, Any]]) -> dict[int, tuple[float, float]]:
-    """Pre-kickoff Elo. Ratings update only *after* each played match is stored."""
-    ratings: dict[int, float] = {}
+    """Pre-kickoff Elo. Ratings update only *after* each played match is stored.
+
+    Ratings are keyed by (competition_id, team_id) so a club in one league never
+    inherits Elo from another competition, even if the numeric team ids collided.
+    """
+    ratings: dict[tuple[int, int], float] = {}
     before: dict[int, tuple[float, float]] = {}
     ordered = sorted(
         rows,
         key=lambda row: (row["match_date"], str(row["kickoff_time"] or ""), row["match_id"]),
     )
     for row in ordered:
+        competition_id = int(row.get("competition_id") or 0)
         home_id = int(row["home_team_id"])
         away_id = int(row["away_team_id"])
-        home_elo = ratings.get(home_id, ELO_START)
-        away_elo = ratings.get(away_id, ELO_START)
+        home_key = (competition_id, home_id)
+        away_key = (competition_id, away_id)
+        home_elo = ratings.get(home_key, ELO_START)
+        away_elo = ratings.get(away_key, ELO_START)
         before[int(row["match_id"])] = (home_elo, away_elo)
         if not row.get("is_played"):
             continue
@@ -324,12 +352,13 @@ def elo_before_matches(rows: Sequence[dict[str, Any]]) -> dict[int, tuple[float,
             actual_home = 0.0
         else:
             actual_home = 0.5
-        ratings[home_id] = home_elo + ELO_K * (actual_home - expected_home)
-        ratings[away_id] = away_elo + ELO_K * ((1.0 - actual_home) - (1.0 - expected_home))
+        ratings[home_key] = home_elo + ELO_K * (actual_home - expected_home)
+        ratings[away_key] = away_elo + ELO_K * ((1.0 - actual_home) - (1.0 - expected_home))
     return before
 
 
 def build_feature_frame(spark: SparkSession, rows: Sequence[dict[str, Any]]) -> DataFrame:
+    rows = _with_competition(rows)
     played_rows = [row for row in rows if row.get("is_played")]
     upcoming_rows = [row for row in rows if not row.get("is_played")]
     if not played_rows:

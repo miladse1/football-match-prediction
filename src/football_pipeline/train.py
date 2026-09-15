@@ -19,6 +19,7 @@ import pandas as pd
 from psycopg.types.json import Jsonb
 
 from football_pipeline import seasons
+from football_pipeline.competitions import DEFAULT_COMPETITION, processed_dir
 from football_pipeline.config import ROOT
 from football_pipeline.constants import FEATURE_VERSION
 from football_pipeline.dataset import FEATURE_COLUMNS
@@ -54,7 +55,29 @@ CANDIDATE_MODELS = dict(SKLEARN_MODELS)
 PRODUCTION_MODELS = frozenset(CANDIDATE_MODELS)
 
 
-def load_training_frame() -> pd.DataFrame:
+def _paths(competition: str) -> dict[str, Path]:
+    folder = processed_dir(competition, root=ROOT)
+    return {
+        "report": folder / "model_metrics.json",
+        "walkforward_json": folder / "walkforward_metrics.json",
+        "walkforward_folds": folder / "walkforward_folds.csv",
+        "walkforward_summary": folder / "walkforward_summary.csv",
+        "final_test": folder / "final_test_metrics.json",
+        "model_dir": ROOT / "data" / "processed" / "models",
+    }
+
+
+def _competition_id(code: str) -> int:
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM competitions WHERE code = %s", (code,))
+            row = cur.fetchone()
+    if row is None:
+        raise RuntimeError(f"Competition {code} is not in the database. Ingest it first.")
+    return int(row[0])
+
+
+def load_training_frame(*, competition: str = DEFAULT_COMPETITION) -> pd.DataFrame:
     with connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -64,8 +87,11 @@ def load_training_frame() -> pd.DataFrame:
                        {", ".join(f"tr.{name}" for name in FEATURE_COLUMNS)}
                 FROM training_rows AS tr
                 JOIN matches AS m ON m.id = tr.match_id
+                JOIN competitions AS c ON c.id = m.competition_id
+                WHERE c.code = %s
                 ORDER BY tr.match_date, tr.match_id
-                """
+                """,
+                (competition,),
             )
             columns = [col.name for col in cur.description]
             rows = cur.fetchall()
@@ -100,6 +126,7 @@ def _insert_run(
     valid: pd.DataFrame | None,
     test: pd.DataFrame | None,
     artifact_path: str | None,
+    competition: str = DEFAULT_COMPETITION,
 ) -> int:
     train_start, train_end = _date_bounds(train)
     valid_start, valid_end = _date_bounds(valid if valid is not None else pd.DataFrame())
@@ -109,14 +136,16 @@ def _insert_run(
             cur.execute(
                 """
                 INSERT INTO model_runs (
+                    competition_id,
                     train_start, train_end, valid_start, valid_end,
                     test_start, test_end, feature_version, algorithm,
                     metrics, artifact_path
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
+                    _competition_id(competition),
                     train_start,
                     train_end,
                     valid_start,
@@ -152,6 +181,7 @@ def run_fingerprint(
     test: pd.DataFrame,
     walkforward_mean_log_loss: float,
     test_log_loss: float,
+    competition: str = DEFAULT_COMPETITION,
 ) -> str:
     """Stable identity for one training outcome.
 
@@ -178,10 +208,19 @@ def run_fingerprint(
         },
         sort_keys=True,
     )
+    if competition != DEFAULT_COMPETITION:
+        payload_obj = json.loads(payload)
+        payload_obj["competition"] = competition
+        payload = json.dumps(payload_obj, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def _find_reusable_run(algorithm: str, fingerprint: str) -> tuple[int, str | None] | None:
+def _find_reusable_run(
+    algorithm: str,
+    fingerprint: str,
+    *,
+    competition: str = DEFAULT_COMPETITION,
+) -> tuple[int, str | None] | None:
     """Newest run with an identical fingerprint, if one exists."""
     with connect() as conn:
         with conn.cursor() as cur:
@@ -190,12 +229,13 @@ def _find_reusable_run(algorithm: str, fingerprint: str) -> tuple[int, str | Non
                 SELECT id, artifact_path
                 FROM model_runs
                 WHERE algorithm = %s
+                  AND competition_id = %s
                   AND feature_version = %s
                   AND metrics->>'run_fingerprint' = %s
                 ORDER BY trained_at DESC, id DESC
                 LIMIT 1
                 """,
-                (algorithm, FEATURE_VERSION, fingerprint),
+                (algorithm, _competition_id(competition), FEATURE_VERSION, fingerprint),
             )
             row = cur.fetchone()
     return (int(row[0]), row[1]) if row else None
@@ -235,8 +275,8 @@ def _fit_and_evaluate(factory, train: pd.DataFrame, valid: pd.DataFrame) -> dict
     return evaluate_split(target_vector(valid), proba)
 
 
-def _write_fold_csv(rows: list[dict]) -> None:
-    WALKFORWARD_FOLDS_CSV.parent.mkdir(parents=True, exist_ok=True)
+def _write_fold_csv(rows: list[dict], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "algorithm",
         "fold",
@@ -260,16 +300,17 @@ def _write_fold_csv(rows: list[dict]) -> None:
         "draw_f1",
         "confusion_matrix",
     ]
-    with WALKFORWARD_FOLDS_CSV.open("w", newline="", encoding="utf-8") as handle:
+    with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
             writer.writerow({key: row.get(key) for key in fieldnames})
 
 
-def _write_summary_csv(summaries: dict[str, dict]) -> None:
+def _write_summary_csv(summaries: dict[str, dict], path: Path) -> None:
     fieldnames = ["algorithm", "stat", *list(next(iter(summaries.values()))["mean"].keys())]
-    with WALKFORWARD_SUMMARY_CSV.open("w", newline="", encoding="utf-8") as handle:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for algorithm, block in summaries.items():
@@ -277,8 +318,9 @@ def _write_summary_csv(summaries: dict[str, dict]) -> None:
                 writer.writerow({"algorithm": algorithm, "stat": stat, **block[stat]})
 
 
-def train_and_evaluate() -> dict:
-    frame = load_training_frame()
+def train_and_evaluate(*, competition: str = DEFAULT_COMPETITION) -> dict:
+    paths = _paths(competition)
+    frame = load_training_frame(competition=competition)
     assert_folds_exclude_test_season(frame)
     production_train = slice_through(frame, PRODUCTION_TRAIN_END)
     test = slice_season(frame, after=PRODUCTION_TRAIN_END, through=TEST_SEASON_END)
@@ -363,7 +405,7 @@ def train_and_evaluate() -> dict:
     selected, selection_reason = select_by_walkforward(summaries)
     logger.info("%s", selection_reason)
 
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    paths["model_dir"].mkdir(parents=True, exist_ok=True)
     factory = CANDIDATE_MODELS[selected]
     production = factory()
     production.fit(feature_matrix(production_train), target_vector(production_train))
@@ -390,6 +432,7 @@ def train_and_evaluate() -> dict:
         test=test,
         walkforward_mean_log_loss=summaries[selected]["mean"]["log_loss"],
         test_log_loss=test_flat["log_loss"],
+        competition=competition,
     )
     run_metrics = {
         "walkforward_mean_log_loss": summaries[selected]["mean"]["log_loss"],
@@ -403,11 +446,16 @@ def train_and_evaluate() -> dict:
         ),
     }
 
-    reusable = _find_reusable_run(selected, fingerprint)
+    reusable = _find_reusable_run(selected, fingerprint, competition=competition)
     if reusable is not None:
         run_id, recorded_path = reusable
-        artifact = Path(recorded_path) if recorded_path else artifact_path_for_run(selected, run_id)
+        artifact = (
+            Path(recorded_path)
+            if recorded_path
+            else artifact_path_for_run(selected, run_id, competition=competition)
+        )
         if not artifact.is_file():
+            artifact.parent.mkdir(parents=True, exist_ok=True)
             joblib.dump(production, artifact)
             logger.info("Rebuilt missing artifact for reused run %s at %s", run_id, artifact)
         if recorded_path != str(artifact):
@@ -427,10 +475,12 @@ def train_and_evaluate() -> dict:
             valid=None,
             test=test,
             artifact_path=None,
+            competition=competition,
         )
         # Versioned by run id, so a later run can never overwrite this artifact
         # and leave an older model_runs row pointing at the wrong model.
-        artifact = artifact_path_for_run(selected, run_id)
+        artifact = artifact_path_for_run(selected, run_id, competition=competition)
+        artifact.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(production, artifact)
         _set_artifact_path(run_id, str(artifact))
         _store_predictions(run_id, test, test_proba)
@@ -496,23 +546,29 @@ def train_and_evaluate() -> dict:
         "model_run_id": run_id,
         "artifact_path": str(artifact),
         "reused_existing_run": reused,
+        "competition": competition,
         "season_windows": seasons.season_windows(),
         "note": walkforward_report["methodology"],
     }
 
-    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_PATH.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
-    WALKFORWARD_JSON.write_text(json.dumps(walkforward_report, indent=2, default=str), encoding="utf-8")
-    FINAL_TEST_JSON.write_text(json.dumps(final_test_report, indent=2, default=str), encoding="utf-8")
-    _write_fold_csv(fold_rows)
-    _write_summary_csv(summaries)
+    paths["report"].parent.mkdir(parents=True, exist_ok=True)
+    paths["report"].write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+    paths["walkforward_json"].write_text(
+        json.dumps(walkforward_report, indent=2, default=str), encoding="utf-8"
+    )
+    paths["final_test"].write_text(
+        json.dumps(final_test_report, indent=2, default=str), encoding="utf-8"
+    )
+    _write_fold_csv(fold_rows, paths["walkforward_folds"])
+    _write_summary_csv(summaries, paths["walkforward_summary"])
     logger.info(
-        "Wrote %s, %s, %s; production model %s (run_id=%s)",
-        WALKFORWARD_JSON,
-        FINAL_TEST_JSON,
-        REPORT_PATH,
+        "Wrote %s, %s, %s; production model %s (run_id=%s) for %s",
+        paths["walkforward_json"],
+        paths["final_test"],
+        paths["report"],
         selected,
         run_id,
+        competition,
     )
     return report
 
@@ -522,10 +578,12 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    argparse.ArgumentParser(
+    parser = argparse.ArgumentParser(
         description="Walk-forward model selection, then one holdout-season test evaluation."
-    ).parse_args()
-    train_and_evaluate()
+    )
+    parser.add_argument("--competition", default=DEFAULT_COMPETITION)
+    args = parser.parse_args()
+    train_and_evaluate(competition=args.competition)
 
 
 if __name__ == "__main__":

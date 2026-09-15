@@ -276,3 +276,33 @@ def test_with_team_crests_on_empty_input():
     from football_dashboard.queries import with_team_crests
 
     assert with_team_crests([]) == []
+
+
+def test_competition_label_covers_the_five_leagues():
+    from football_dashboard.formatters import competition_label
+
+    assert competition_label("E0") == "Premier League"
+    assert competition_label("SP1") == "La Liga"
+    assert competition_label("D1") == "Bundesliga"
+    assert competition_label("I1") == "Serie A"
+    assert competition_label("F1") == "Ligue 1"
+    assert competition_label("La Liga") == "La Liga"
+
+
+def test_dashboard_queries_always_filter_by_competition():
+    from pathlib import Path
+
+    source = Path("src/football_dashboard/queries.py").read_text(encoding="utf-8")
+    for name in (
+        "upcoming_fixtures",
+        "settled_live_fixtures",
+        "list_teams",
+        "overview_payload",
+        "forecast_payload",
+        "performance_payload",
+    ):
+        assert f"def {name}" in source
+    assert source.count("c.code = %s") >= 6
+    assert "competition=_league(league)" in Path("src/football_dashboard/app.py").read_text(
+        encoding="utf-8"
+    )

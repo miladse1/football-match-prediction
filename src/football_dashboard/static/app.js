@@ -6,6 +6,25 @@ const view = document.getElementById("view");
 const seasonLabel = document.getElementById("season-label");
 const footMeta = document.getElementById("foot-meta");
 const PAGE_SIZE = 16;
+const DEFAULT_LEAGUE = "E0";
+
+function currentLeague() {
+  return new URLSearchParams(window.location.search).get("league") || DEFAULT_LEAGUE;
+}
+
+function withLeague(href, extra = {}) {
+  const url = new URL(href, window.location.origin);
+  url.searchParams.set("league", currentLeague());
+  Object.entries(extra).forEach(([key, value]) => {
+    if (value) url.searchParams.set(key, value);
+    else url.searchParams.delete(key);
+  });
+  return `${url.pathname}${url.search}`;
+}
+
+function leagueName(data) {
+  return (data && data.competition && data.competition.name) || "Premier League";
+}
 
 /* ---------------------------------------------------------------- utils -- */
 
@@ -113,6 +132,7 @@ function setNav() {
   const current = pathOf();
   document.querySelectorAll("[data-nav]").forEach((link) => {
     const target = link.dataset.nav;
+    link.setAttribute("href", withLeague(target));
     const active =
       current === target ||
       (target === "/upcoming" && current.startsWith("/upcoming/")) ||
@@ -120,6 +140,14 @@ function setNav() {
     link.classList.toggle("active", active);
     if (active) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
+  });
+  const brand = document.querySelector(".brand");
+  if (brand) brand.setAttribute("href", withLeague("/"));
+  const league = currentLeague();
+  document.querySelectorAll("[data-league]").forEach((link) => {
+    const code = link.dataset.league;
+    link.classList.toggle("is-active", code === league);
+    link.setAttribute("href", `${current || "/"}?league=${code}`);
   });
   const active = document.querySelector(".nav a.active");
   if (active) active.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -259,7 +287,9 @@ function verdictBadge(correct) {
 }
 
 function matchCard(item, { settled = false, showDate = false } = {}) {
-  const href = item.match_id ? `${settled ? "/results" : "/upcoming"}/${item.match_id}` : "";
+  const href = item.match_id
+    ? withLeague(`${settled ? "/results" : "/upcoming"}/${item.match_id}`)
+    : "";
   const link = href
     ? `<a class="stretch-link" data-link href="${href}" aria-label="${escapeHtml(
         `${item.home_team} versus ${item.away_team}, match detail`,
@@ -381,6 +411,7 @@ function bindFilters(basePath) {
     const data = new FormData(form);
     go(
       `${basePath}${qs({
+        league: currentLeague(),
         team: data.get("team"),
         date_from: data.get("date_from"),
         date_to: data.get("date_to"),
@@ -388,7 +419,7 @@ function bindFilters(basePath) {
       })}`,
     );
   });
-  document.getElementById("clear-filters")?.addEventListener("click", () => go(basePath));
+  document.getElementById("clear-filters")?.addEventListener("click", () => go(withLeague(basePath)));
 }
 
 function pager(data, buildHref) {
@@ -448,7 +479,7 @@ function titleRacePanel(forecast) {
     <article class="panel">
       <div class="section-head" style="margin-bottom:var(--sp-3)">
         <h2>Title race</h2>
-        <a class="pill" data-link href="/forecast">Full forecast</a>
+        <a class="pill" data-link href="${withLeague("/forecast")}">Full forecast</a>
       </div>
       <p class="help" style="margin-bottom:var(--sp-3)">
         Chance of finishing first across ${forecast.n_sims.toLocaleString("en-GB")} simulated seasons.
@@ -459,12 +490,10 @@ function titleRacePanel(forecast) {
 }
 
 async function renderOverview() {
-  const data = await fetchJson("/api/overview");
-  /* The forecast is a separate read-only endpoint. It can legitimately be
-     unavailable (503) before the first pipeline run, so never block on it. */
-  const forecast = await fetchJson("/api/forecast").catch(() => null);
+  const data = await fetchJson(`/api/overview${qs({ league: currentLeague() })}`);
+  const forecast = await fetchJson(`/api/forecast${qs({ league: currentLeague() })}`).catch(() => null);
 
-  setSeason(`Premier League · ${data.live_season}`);
+  setSeason(`${leagueName(data)} · ${data.live_season}`);
   setFootMeta(data.model, `Predictions updated ${formatStamp(data.predictions_updated_at)}`);
 
   const live = data.live_scorecard;
@@ -474,7 +503,7 @@ async function renderOverview() {
     <div class="page-head">
       <div class="page-head-main">
         <p class="eyebrow">Season ${escapeHtml(data.live_season)}</p>
-        <h1>Premier League predictions</h1>
+        <h1>${escapeHtml(leagueName(data))} predictions</h1>
         <p class="lede">
           Home, Draw and Away probabilities for every remaining fixture, frozen the moment a match
           kicks off so results are always judged against what was predicted beforehand.
@@ -509,7 +538,7 @@ async function renderOverview() {
       <div>
         <div class="section-head">
           <h2>Next fixtures</h2>
-          <a class="pill" data-link href="/upcoming">All fixtures →</a>
+          <a class="pill" data-link href="${withLeague("/upcoming")}">All fixtures →</a>
         </div>
         <div class="match-grid">
           ${data.next_upcoming.length
@@ -524,7 +553,7 @@ async function renderOverview() {
         <article class="panel">
           <div class="section-head" style="margin-bottom:var(--sp-3)">
             <h2>Latest result</h2>
-            <a class="pill" data-link href="/results">All results</a>
+            <a class="pill" data-link href="${withLeague("/results")}">All results</a>
           </div>
           ${latest
             ? html`
@@ -560,6 +589,7 @@ async function renderOverview() {
 function listQuery() {
   const params = new URLSearchParams(window.location.search);
   return {
+    league: currentLeague(),
     team: params.get("team") || "",
     date_from: params.get("date_from") || "",
     date_to: params.get("date_to") || "",
@@ -571,11 +601,11 @@ function listQuery() {
 async function renderUpcoming() {
   const query = listQuery();
   const data = await fetchJson(`/api/upcoming${qs(query)}`);
-  setSeason(`Premier League · ${data.live_season}`);
+  setSeason(`${leagueName(data)} · ${data.live_season}`);
   setFootMeta(data.model);
 
   const hrefFor = (page) =>
-    `/upcoming${qs({ team: query.team, date_from: query.date_from, date_to: query.date_to, page })}`;
+    `/upcoming${qs({ league: query.league, team: query.team, date_from: query.date_from, date_to: query.date_to, page })}`;
 
   view.innerHTML = html`
     <div class="page-head">
@@ -597,11 +627,11 @@ async function renderUpcoming() {
 async function renderResults() {
   const query = listQuery();
   const data = await fetchJson(`/api/results${qs(query)}`);
-  setSeason(`Premier League · ${data.live_season}`);
+  setSeason(`${leagueName(data)} · ${data.live_season}`);
   setFootMeta(data.model);
 
   const hrefFor = (page) =>
-    `/results${qs({ team: query.team, date_from: query.date_from, date_to: query.date_to, page })}`;
+    `/results${qs({ league: query.league, team: query.team, date_from: query.date_from, date_to: query.date_to, page })}`;
 
   view.innerHTML = html`
     <div class="page-head">
@@ -650,10 +680,12 @@ function rateRows(slice, emptyLabel) {
 }
 
 async function renderPerformance() {
-  const data = await fetchJson("/api/performance");
-  const recent = await fetchJson(`/api/results${qs({ page: "1", page_size: "20" })}`).catch(() => null);
+  const data = await fetchJson(`/api/performance${qs({ league: currentLeague() })}`);
+  const recent = await fetchJson(
+    `/api/results${qs({ league: currentLeague(), page: "1", page_size: "20" })}`,
+  ).catch(() => null);
   const live = data.live_scorecard;
-  setSeason(`Premier League · ${data.live_season}`);
+  setSeason(`${leagueName(data)} · ${data.live_season}`);
   setFootMeta(data.model);
 
   const settled = recent
@@ -667,7 +699,7 @@ async function renderPerformance() {
         <a
           class="streak-chip ${item.correct ? "ok" : "miss"}"
           data-link
-          href="/results/${item.match_id}"
+          href="${withLeague(`/results/${item.match_id}`)}"
           title="${escapeHtml(
             `${item.home_team} ${item.home_goals}–${item.away_goals} ${item.away_team} · picked ${item.predicted_outcome}`,
           )}"
@@ -687,7 +719,7 @@ async function renderPerformance() {
           selection and the untouched holdout test are on the model page.
         </p>
       </div>
-      <a class="pill" data-link href="/about">How the model was chosen →</a>
+      <a class="pill" data-link href="${withLeague("/about")}">How the model was chosen →</a>
     </div>
 
     <section class="kpi-grid">
@@ -760,7 +792,8 @@ const FORECAST_COLUMNS = [
   { key: "current_played", label: "Pld", sortable: true },
   { key: "current_points", label: "Pts", sortable: true },
   { key: "title_prob", label: "Title", sortable: true },
-  { key: "top4_prob", label: "Top 4", sortable: true },
+  { key: "ucl_prob", label: "UCL", sortable: true },
+  { key: "europe_prob", label: "Europe", sortable: true },
   { key: "relegation_prob", label: "Relegation", sortable: true },
   { key: "expected_points", label: "Exp. pts", sortable: true },
   { key: "expected_position", label: "Exp. pos", sortable: true },
@@ -770,7 +803,7 @@ function forecastRow(row, index) {
   const zone =
     row.title_prob >= 0.05
       ? "zone-title"
-      : row.top4_prob >= 0.5
+      : row.ucl_prob >= 0.5 || row.top4_prob >= 0.5
         ? "zone-ucl"
         : row.relegation_prob >= 0.5
           ? "zone-rel"
@@ -793,7 +826,8 @@ function forecastRow(row, index) {
       <td class="num-soft">${row.current_played}</td>
       <td class="num">${row.current_points}</td>
       <td>${bar("title", row.title_prob)}</td>
-      <td>${bar("top4", row.top4_prob)}</td>
+      <td>${bar("top4", row.ucl_prob ?? row.top4_prob)}</td>
+      <td>${bar("top4", row.europe_prob || 0)}</td>
       <td>${bar("rel", row.relegation_prob)}</td>
       <td class="num">${fmtNum(row.expected_points)}</td>
       <td class="num-soft">${fmtNum(row.expected_position)}</td>
@@ -852,8 +886,8 @@ function bindForecastSort() {
 }
 
 async function renderForecast() {
-  const data = await fetchJson("/api/forecast");
-  setSeason(`Premier League · ${data.live_season}`);
+  const data = await fetchJson(`/api/forecast${qs({ league: currentLeague() })}`);
+  setSeason(`${leagueName(data)} · ${data.live_season}`);
   setFootMeta(data.model, `Forecast generated ${formatStamp(data.generated_at)}`);
 
   forecastState = { rows: data.teams || [], sort: null, dir: "desc" };
@@ -887,6 +921,7 @@ async function renderForecast() {
         <p class="lede">
           Every remaining fixture is replayed ${data.n_sims.toLocaleString("en-GB")} times using the
           stored Home / Draw / Away probabilities, then the final table is counted up.
+          ${data.qualification_note ? ` ${escapeHtml(data.qualification_note)}` : ""}
         </p>
       </div>
     </div>
@@ -931,7 +966,7 @@ async function renderForecast() {
       </div>
       <div class="legend">
         <span><i style="background:var(--accent)"></i> Title contender</span>
-        <span><i style="background:var(--away)"></i> Likely top four</span>
+        <span><i style="background:var(--away)"></i> Likely Champions League</span>
         <span><i style="background:var(--miss)"></i> Likely relegation</span>
         <span>Rows are ordered by title probability until you sort.</span>
       </div>
@@ -1020,7 +1055,9 @@ function matchHero(match, { settled }) {
 }
 
 function h2hRow(meeting) {
-  const href = meeting.detail_path || `/results/${meeting.match_id}`;
+  const href = meeting.detail_path
+    ? withLeague(meeting.detail_path)
+    : withLeague(`/results/${meeting.match_id}`);
   return html`
     <a class="h2h-row" data-link href="${href}">
       <span class="h2h-date">${formatShortDate(meeting.kickoff_date)}</span>
@@ -1098,15 +1135,16 @@ function statsPanel(match, stats, available) {
 
 async function renderMatchDetail(matchId, requestedKind) {
   const data = await fetchJson(`/api/matches/${matchId}`);
-  const canonical = data.kind === "result" ? `/results/${matchId}` : `/upcoming/${matchId}`;
-  if (requestedKind && requestedKind !== data.kind) {
+  const league = (data.competition && data.competition.code) || currentLeague();
+  const canonical = `${data.kind === "result" ? "/results" : "/upcoming"}/${matchId}?league=${league}`;
+  if (`${pathOf()}${window.location.search}` !== canonical) {
     window.history.replaceState({}, "", canonical);
     setNav();
   }
 
   const match = data.match;
   const settled = data.kind === "result";
-  setSeason(`Premier League · ${data.live_season}`);
+  setSeason(`${leagueName(data)} · ${data.live_season}`);
   setFootMeta(data.model);
 
   const secondary = settled
@@ -1142,7 +1180,7 @@ async function renderMatchDetail(matchId, requestedKind) {
 
   view.innerHTML = html`
     <p class="back-row">
-      <a class="pill" data-link href="${settled ? "/results" : "/upcoming"}">
+      <a class="pill" data-link href="${withLeague(settled ? "/results" : "/upcoming")}">
         ← Back to ${settled ? "results" : "fixtures"}
       </a>
     </p>
@@ -1158,9 +1196,9 @@ function metric(label, value) {
 }
 
 async function renderAbout() {
-  const data = await fetchJson("/api/about");
+  const data = await fetchJson(`/api/about${qs({ league: currentLeague() })}`);
   const test = data.test || {};
-  setSeason("Premier League");
+  setSeason(leagueName(data));
   setFootMeta(data.model);
 
   const folds = (data.walkforward_folds || [])
@@ -1287,7 +1325,7 @@ async function render() {
           <p class="lede">${escapeHtml(error.message || "Could not load this page from the database.")}</p>
         </div>
       </div>
-      <p class="back-row"><a class="btn btn-primary" data-link href="/">Back to overview</a></p>
+      <p class="back-row"><a class="btn btn-primary" data-link href="${withLeague("/")}">Back to overview</a></p>
     `;
   }
 }

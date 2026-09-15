@@ -21,12 +21,21 @@ def load_matches(*, competition: str | None = None, start_year: int | None = Non
             if not payloads:
                 raise TransformError("No raw_match_payloads rows matched the filter. Run ingest first.")
 
-            team_ids: dict[str, int] = {}
+            team_ids: dict[tuple[int, str], int] = {}
             inserted = 0
             updated = 0
             kept_ids: list[int] = []
             season_ids: set[int] = set()
-            for raw_id, competition_id, season_id, source_file, row_number, payload in payloads:
+            for raw_id, competition_id, season_id, source_file, row_number, payload, code in payloads:
+                div = str((payload or {}).get("Div") or "").strip()
+                if div and div != code:
+                    logger.warning(
+                        "Skipping raw_match_payloads.id=%s: Div=%s does not belong in %s",
+                        raw_id,
+                        div,
+                        code,
+                    )
+                    continue
                 try:
                     match = transform_payload(payload)
                 except TransformError as exc:
@@ -34,8 +43,20 @@ def load_matches(*, competition: str | None = None, start_year: int | None = Non
                         f"raw_match_payloads.id={raw_id} ({source_file} row {row_number}): {exc}"
                     ) from exc
 
-                home_id = _upsert_team(cur, team_ids, match.home_source_name, match.home_canonical_name)
-                away_id = _upsert_team(cur, team_ids, match.away_source_name, match.away_canonical_name)
+                home_id = _upsert_team(
+                    cur,
+                    team_ids,
+                    match.home_source_name,
+                    match.home_canonical_name,
+                    competition_id,
+                )
+                away_id = _upsert_team(
+                    cur,
+                    team_ids,
+                    match.away_source_name,
+                    match.away_canonical_name,
+                    competition_id,
+                )
                 match_id, was_insert = _upsert_match(
                     cur,
                     competition_id=competition_id,
@@ -78,7 +99,7 @@ def load_matches(*, competition: str | None = None, start_year: int | None = Non
 
 def _fetch_payloads(cur, *, competition: str | None, start_year: int | None):
     query = """
-        SELECT r.id, s.competition_id, r.season_id, r.source_file, r.row_number, r.payload
+        SELECT r.id, s.competition_id, r.season_id, r.source_file, r.row_number, r.payload, c.code
         FROM raw_match_payloads AS r
         JOIN seasons AS s ON s.id = r.season_id
         JOIN competitions AS c ON c.id = s.competition_id
@@ -90,49 +111,74 @@ def _fetch_payloads(cur, *, competition: str | None, start_year: int | None):
     return cur.fetchall()
 
 
-def _upsert_team(cur, cache: dict[str, int], source_name: str, canonical_name: str) -> int:
-    if canonical_name in cache:
-        return cache[canonical_name]
-    cur.execute("SELECT id FROM teams WHERE canonical_name = %s", (canonical_name,))
+def _upsert_team(
+    cur,
+    cache: dict[tuple[int, str], int],
+    source_name: str,
+    canonical_name: str,
+    competition_id: int,
+) -> int:
+    key = (int(competition_id), canonical_name)
+    if key in cache:
+        return cache[key]
+    cur.execute(
+        """
+        SELECT id FROM teams
+        WHERE competition_id = %s AND canonical_name = %s
+        """,
+        (competition_id, canonical_name),
+    )
     row = cur.fetchone()
     if row:
-        cache[canonical_name] = row[0]
+        cache[key] = row[0]
         return row[0]
-    cur.execute("SELECT id, canonical_name FROM teams WHERE source_name = %s", (source_name,))
+    cur.execute(
+        """
+        SELECT id, canonical_name FROM teams
+        WHERE competition_id = %s AND source_name = %s
+        """,
+        (competition_id, source_name),
+    )
     row = cur.fetchone()
     if row:
         team_id, existing_canonical = row
         if existing_canonical != canonical_name:
-            cur.execute("SELECT id FROM teams WHERE canonical_name = %s", (canonical_name,))
+            cur.execute(
+                """
+                SELECT id FROM teams
+                WHERE competition_id = %s AND canonical_name = %s
+                """,
+                (competition_id, canonical_name),
+            )
             taken = cur.fetchone()
             if taken:
-                cache[canonical_name] = taken[0]
+                cache[key] = taken[0]
                 return taken[0]
             cur.execute(
                 "UPDATE teams SET canonical_name = %s WHERE id = %s",
                 (canonical_name, team_id),
             )
-        cache[canonical_name] = team_id
+        cache[key] = team_id
         return team_id
     cur.execute(
         """
-        INSERT INTO teams (source_name, canonical_name)
-        VALUES (%s, %s)
-        ON CONFLICT (canonical_name) DO UPDATE
+        INSERT INTO teams (competition_id, source_name, canonical_name)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (competition_id, canonical_name) DO UPDATE
             SET source_name = teams.source_name
         RETURNING id
         """,
-        (source_name, canonical_name),
+        (competition_id, source_name, canonical_name),
     )
     team_id = cur.fetchone()[0]
-    cache[canonical_name] = team_id
+    cache[key] = team_id
     return team_id
 
 
 def choose_reschedule_target(existing: list[dict], *, incoming_played: bool) -> dict | None:
     """Pick the existing (season, home, away) row that should absorb this payload.
 
-    Premier League clubs play each opponent at home once per season. A date
+    Clubs play each opponent at home once per season. A date
     change is a postponement of that fixture, not a second match. Prefer the
     row that already has stored predictions so frozen probabilities stay
     attached to the same match_id.

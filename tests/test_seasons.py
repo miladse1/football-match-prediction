@@ -117,3 +117,5 @@ def test_fixtures_url_tracks_the_live_season():
     assert seasons.fixtures_url(AFTER_ROLLOVER).endswith("epl-2026")
     assert seasons.fixtures_url(BEFORE_ROLLOVER).endswith("epl-2025")
     assert seasons.fixtures_url(NEXT_ROLLOVER).endswith("epl-2027")
+    assert seasons.fixtures_url(AFTER_ROLLOVER, competition="SP1").endswith("la-liga-2026")
+    assert seasons.fixtures_url(AFTER_ROLLOVER, competition="I1").endswith("serie-a-2026")

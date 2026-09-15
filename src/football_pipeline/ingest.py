@@ -13,6 +13,7 @@ from pathlib import Path
 
 from psycopg.types.json import Jsonb
 
+from football_pipeline.competitions import COMPETITIONS, get as get_competition
 from football_pipeline.config import RAW_DATA_DIR
 from football_pipeline.db import connect
 from football_pipeline.football_data import (
@@ -29,10 +30,6 @@ from football_pipeline.validation import (
 
 logger = logging.getLogger(__name__)
 
-COMPETITIONS = {
-    "E0": {"name": "English Premier League", "country": "England"},
-}
-
 
 def ingest_season(
     competition_code: str,
@@ -42,7 +39,7 @@ def ingest_season(
     force_download: bool = False,
 ) -> dict[str, int]:
     if competition_code not in COMPETITIONS:
-        known = ", ".join(sorted(COMPETITIONS))
+        known = ", ".join(COMPETITIONS)
         raise IngestError(f"Unknown competition {competition_code!r}. Known: {known}")
 
     source_file = f"{competition_code}_{start_year}-{start_year + 1}.csv"
@@ -138,7 +135,8 @@ def _read_csv_rows(path: Path) -> list[dict[str, str]]:
 
 
 def _upsert_season(cur, competition_code: str, start_year: int) -> int:
-    meta = COMPETITIONS[competition_code]
+    spec = get_competition(competition_code)
+    meta = {"name": spec.name, "country": spec.country}
     cur.execute(
         """
         INSERT INTO competitions (code, name, country)
@@ -203,7 +201,7 @@ def main() -> None:
         "--end-year",
         type=int,
         default=None,
-        help="Last season start year (inclusive). Default: current Premier League season.",
+        help="Last season start year (inclusive). Default: current live season.",
     )
     parser.add_argument(
         "--from-file",

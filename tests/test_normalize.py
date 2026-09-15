@@ -9,6 +9,14 @@ def test_aliases_collapse_common_spellings():
     assert canonical_team_name("Man City") == "Manchester City"
     assert canonical_team_name("Nott'm Forest") == "Nottingham Forest"
     assert canonical_team_name("  Arsenal  ") == "Arsenal"
+    assert canonical_team_name("Ath Madrid") == "Atletico Madrid"
+    assert canonical_team_name("Atlético de Madrid") == "Atletico Madrid"
+    assert canonical_team_name("FC Barcelona") == "Barcelona"
+    assert canonical_team_name("M'gladbach") == "Borussia Mönchengladbach"
+    assert canonical_team_name("FC Bayern München") == "Bayern Munich"
+    assert canonical_team_name("Paris SG") == "Paris Saint-Germain"
+    assert canonical_team_name("Olympique de Marseille") == "Olympique Marseille"
+    assert canonical_team_name("Inter") == "Internazionale"
 
 
 def test_dd_mm_yyyy_and_two_digit_year_parse():

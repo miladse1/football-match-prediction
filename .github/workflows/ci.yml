@@ -134,8 +134,9 @@ jobs:
           # initialises, so it would fail with "no such table: dag".
           dag = bag.dags.get("football_match_pipeline")
           assert dag is not None, f"football_match_pipeline not found in {sorted(bag.dags)}"
-          expected = {
-              "migrate_db",
+          assert "migrate_db" in dag.task_ids
+          leagues = ("E0", "SP1", "D1", "I1", "F1")
+          stages = (
               "ingest_raw",
               "ingest_fixtures",
               "load_core_tables",
@@ -144,7 +145,8 @@ jobs:
               "train_evaluate",
               "predict_upcoming",
               "season_forecast",
-          }
+          )
+          expected = {"migrate_db"} | {f"{code}.{stage}" for code in leagues for stage in stages}
           missing = expected - set(dag.task_ids)
           assert not missing, f"missing tasks: {sorted(missing)}"
           print(f"DAG parsed with {len(dag.task_ids)} tasks: {sorted(dag.task_ids)}")

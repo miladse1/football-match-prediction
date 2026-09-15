@@ -23,20 +23,27 @@ def _result_counts(rows: list[tuple]) -> dict[str, int]:
     return counts
 
 
-def collect_match_summary() -> dict:
+def collect_match_summary(*, competition: str | None = None) -> dict:
+    league_filter = ""
+    params: tuple = ()
+    if competition:
+        league_filter = "JOIN competitions AS c ON c.id = m.competition_id WHERE c.code = %s"
+        params = (competition,)
     with connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT s.start_year, s.name,
                        count(*) AS n,
                        count(*) FILTER (WHERE m.is_played) AS played,
                        count(*) FILTER (WHERE NOT m.is_played) AS unplayed
                 FROM matches AS m
                 JOIN seasons AS s ON s.id = m.season_id
+                {league_filter}
                 GROUP BY s.start_year, s.name
                 ORDER BY s.start_year
-                """
+                """,
+                params,
             )
             by_season = [
                 {
@@ -49,19 +56,30 @@ def collect_match_summary() -> dict:
                 for start_year, name, n, played, unplayed in cur.fetchall()
             ]
             cur.execute(
-                """
+                f"""
                 SELECT result_code, count(*)
-                FROM matches
-                WHERE is_played
+                FROM matches AS m
+                {"JOIN competitions AS c ON c.id = m.competition_id" if competition else ""}
+                WHERE m.is_played
+                  {"AND c.code = %s" if competition else ""}
                 GROUP BY result_code
-                """
+                """,
+                params,
             )
             results = _result_counts(cur.fetchall())
-            cur.execute("SELECT count(*) FROM match_features")
+            cur.execute(
+                f"""
+                SELECT count(*) FROM match_features AS f
+                JOIN matches AS m ON m.id = f.match_id
+                {"JOIN competitions AS c ON c.id = m.competition_id WHERE c.code = %s" if competition else ""}
+                """,
+                params,
+            )
             n_features = int(cur.fetchone()[0])
     played = sum(item["played"] for item in by_season)
     unplayed = sum(item["unplayed"] for item in by_season)
     summary = {
+        "competition": competition,
         "seasons": by_season,
         "played": played,
         "unplayed": unplayed,
@@ -79,7 +97,7 @@ def collect_match_summary() -> dict:
     return summary
 
 
-def write_pipeline_summary(payload: dict) -> dict:
+def write_pipeline_summary(payload: dict, *, competition: str | None = None) -> dict:
     SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
     existing: dict = {}
     if SUMMARY_PATH.is_file():
@@ -87,7 +105,14 @@ def write_pipeline_summary(payload: dict) -> dict:
             existing = json.loads(SUMMARY_PATH.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             existing = {}
-    existing.update(payload)
+    if competition:
+        leagues = existing.setdefault("competitions", {})
+        league = leagues.setdefault(competition, {})
+        league.update(payload)
+        if competition == "E0":
+            existing.update(payload)
+    else:
+        existing.update(payload)
     SUMMARY_PATH.write_text(json.dumps(existing, indent=2, default=str), encoding="utf-8")
     logger.info("Wrote %s", SUMMARY_PATH)
     return existing

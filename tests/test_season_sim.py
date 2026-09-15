@@ -168,7 +168,7 @@ def test_dag_runs_season_forecast_after_predict_upcoming():
     tasks = Path("src/football_pipeline/tasks.py").read_text(encoding="utf-8")
     assert "def simulate_live_season" in tasks
     assert "run_live_forecast" in tasks
-    assert dag.index(">> predict_upcoming()") < dag.index(">> season_forecast()")
+    assert dag.index(">> predict_upcoming") < dag.index(">> season_forecast")
     assert "insert into predictions" not in tasks.lower()
 
 
@@ -179,5 +179,36 @@ def test_dag_is_scheduled_twice_weekly_without_catchup_or_overlap():
     assert "catchup=False" in dag
     assert "max_active_runs=1" in dag
     assert "migrate_db()" in dag
-    assert ">> ingest_raw()" in dag
-    assert ">> season_forecast()" in dag
+    assert 'task_id="ingest_raw"' in dag
+    assert ">> ingest_fixtures" in dag
+    assert ">> season_forecast" in dag
+
+
+def test_dag_reuses_one_taskgroup_factory_for_all_five_leagues():
+    dag = Path("airflow/dags/football_match_dag.py").read_text(encoding="utf-8")
+    assert dag.count("def _league_group") == 1
+    assert "TaskGroup" in dag
+    assert "for index, code in enumerate(SUPPORTED_CODES)" in dag
+    assert dag.count('task_id="ingest_raw"') == 1
+    assert "NONE_FAILED" in dag
+
+
+def test_bundesliga_relegation_band_is_two_places():
+    teams = [f"Team {i}" for i in range(18)]
+    table = build_table([], teams)
+    remaining = [
+        RemainingFixture(i, teams[i % 18], teams[(i + 1) % 18], 0.33, 0.34, 0.33) for i in range(8)
+    ]
+    report = simulate_season(
+        teams=teams,
+        table=table,
+        remaining=remaining,
+        n_sims=400,
+        seed=7,
+        ucl_places=4,
+        europe_places=6,
+        relegation_places=2,
+    )
+    assert abs(report["title_prob_sum"] - 1.0) < 1e-12
+    assert abs(report["ucl_prob_sum"] - 4.0) < 1e-12
+    assert abs(report["relegation_prob_sum"] - 2.0) < 1e-12

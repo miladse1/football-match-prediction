@@ -73,7 +73,7 @@ def test_artifact_paths_do_not_collide_across_runs():
 def test_training_writes_a_run_scoped_artifact_not_a_shared_one():
     source = Path("src/football_pipeline/train.py").read_text(encoding="utf-8")
     assert 'MODEL_DIR / f"{selected}.joblib"' not in source
-    assert "artifact_path_for_run(selected, run_id)" in source
+    assert "artifact_path_for_run(selected, run_id, competition=competition)" in source
 
 
 def test_training_reuses_an_identical_run_instead_of_duplicating_rows():
@@ -98,3 +98,9 @@ def test_production_model_choice_is_unchanged():
         "random_forest",
         "xgboost",
     ]
+
+
+def test_premier_league_fingerprint_omits_competition_so_existing_runs_reuse():
+    assert _fingerprint() == _fingerprint(competition="E0")
+    assert _fingerprint() != _fingerprint(competition="SP1")
+    assert _fingerprint(competition="SP1") == _fingerprint(competition="SP1")

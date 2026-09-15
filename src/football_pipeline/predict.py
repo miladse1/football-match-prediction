@@ -8,6 +8,7 @@ import logging
 
 import pandas as pd
 
+from football_pipeline.competitions import DEFAULT_COMPETITION, processed_dir
 from football_pipeline.config import ROOT
 from football_pipeline.dataset import FEATURE_COLUMNS
 from football_pipeline.db import connect
@@ -28,7 +29,7 @@ def format_prediction(home: str, away: str, p_away: float, p_draw: float, p_home
     )
 
 
-def load_upcoming_frame() -> pd.DataFrame:
+def load_upcoming_frame(*, competition: str = DEFAULT_COMPETITION) -> pd.DataFrame:
     feature_sql = ", ".join(f"f.{name}" for name in FEATURE_COLUMNS)
     with connect() as conn:
         with conn.cursor() as cur:
@@ -45,9 +46,11 @@ def load_upcoming_frame() -> pd.DataFrame:
                 JOIN match_features AS f ON f.match_id = m.id
                 JOIN teams AS home ON home.id = m.home_team_id
                 JOIN teams AS away ON away.id = m.away_team_id
-                WHERE m.is_played = FALSE
+                JOIN competitions AS c ON c.id = m.competition_id
+                WHERE m.is_played = FALSE AND c.code = %s
                 ORDER BY m.match_date, m.kickoff_time, m.id
-                """
+                """,
+                (competition,),
             )
             columns = [col.name for col in cur.description]
             rows = cur.fetchall()
@@ -56,16 +59,17 @@ def load_upcoming_frame() -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
-def predict_upcoming() -> list[dict]:
-    production = production_model()
+def predict_upcoming(*, competition: str = DEFAULT_COMPETITION) -> list[dict]:
+    production = production_model(competition=competition)
     algorithm = production.algorithm
     run_id = production.model_run_id
-    model = load_estimator(production)
-    frame = load_upcoming_frame()
+    model = load_estimator(production, competition=competition)
+    frame = load_upcoming_frame(competition=competition)
+    csv_path = processed_dir(competition, root=ROOT) / "upcoming_predictions.csv"
     if frame.empty:
         logger.info("No unplayed matches with features; skipping upcoming predictions.")
-        CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with CSV_PATH.open("w", newline="", encoding="utf-8") as handle:
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with csv_path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(
                 handle,
                 fieldnames=[
@@ -93,6 +97,7 @@ def predict_upcoming() -> list[dict]:
             "away_team": row.away_team,
             "match_date": str(row.match_date),
             "algorithm": algorithm,
+            "competition": competition,
             "p_away": float(probs[0]),
             "p_draw": float(probs[1]),
             "p_home": float(probs[2]),
@@ -126,12 +131,12 @@ def predict_upcoming() -> list[dict]:
             )
         conn.commit()
 
-    CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with CSV_PATH.open("w", newline="", encoding="utf-8") as handle:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(records[0].keys()))
         writer.writeheader()
         writer.writerows(records)
-    logger.info("Wrote %s using %s (model_run_id=%s)", CSV_PATH, algorithm, run_id)
+    logger.info("Wrote %s using %s (model_run_id=%s)", csv_path, algorithm, run_id)
     return records
 
 
@@ -140,8 +145,10 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    argparse.ArgumentParser(description="Predict Home/Draw/Away probabilities for unplayed matches.").parse_args()
-    predict_upcoming()
+    parser = argparse.ArgumentParser(description="Predict Home/Draw/Away probabilities for unplayed matches.")
+    parser.add_argument("--competition", default=DEFAULT_COMPETITION)
+    args = parser.parse_args()
+    predict_upcoming(competition=args.competition)
 
 
 if __name__ == "__main__":

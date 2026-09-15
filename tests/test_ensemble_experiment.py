@@ -1,11 +1,19 @@
 import numpy as np
 
 from football_pipeline.ensemble_experiment import (
+    EXPERIMENT_DIR,
+    FIXED_ENSEMBLES,
+    INVLL_NAME,
     PRODUCTION_REPORT,
+    REPORT_PATH,
     inverse_logloss_weights,
+    is_complex_candidate,
     mix_proba,
+    recommend_action,
+    report_path_for,
 )
 from football_pipeline.metrics import evaluate_split
+from football_pipeline.registry import report_path_for as production_report_path
 
 
 def test_mix_proba_is_probability_average_not_vote():
@@ -51,7 +59,102 @@ def test_evaluate_split_reports_class_brier():
 
 
 def test_experiment_output_path_is_not_production_report():
-    from football_pipeline.ensemble_experiment import REPORT_PATH
-
     assert REPORT_PATH != PRODUCTION_REPORT
     assert "experiments" in str(REPORT_PATH)
+    assert EXPERIMENT_DIR in REPORT_PATH.parents
+
+
+def test_per_league_reports_stay_under_experiments_and_apart():
+    e0 = report_path_for("E0")
+    sp1 = report_path_for("SP1")
+    assert e0 != sp1
+    assert e0.parent != sp1.parent
+    for path, code in ((e0, "E0"), (sp1, "SP1"), (report_path_for("D1"), "D1")):
+        assert "experiments" in path.parts
+        assert path.name == "ensemble_walkforward.json"
+        assert path.parts[-2] == code
+        assert path.resolve() != production_report_path(code).resolve()
+
+
+def test_fixed_ensembles_cover_requested_blends():
+    members = {name: frozenset(weights) for name, weights in FIXED_ENSEMBLES.items()}
+    assert frozenset({"logistic_regression", "xgboost"}) in members.values()
+    assert frozenset({"logistic_regression", "poisson_dixon_coles"}) in members.values()
+    assert frozenset({"xgboost", "poisson_dixon_coles"}) in members.values()
+    assert frozenset({"logistic_regression", "xgboost", "poisson_dixon_coles"}) in members.values()
+    assert INVLL_NAME.startswith("ensemble_")
+    assert is_complex_candidate(INVLL_NAME)
+    assert is_complex_candidate("poisson_dixon_coles")
+    assert not is_complex_candidate("logistic_regression")
+    assert not is_complex_candidate("xgboost")
+
+
+def test_mix_proba_three_models_equal_weights():
+    a = np.array([[0.6, 0.2, 0.2]])
+    b = np.array([[0.2, 0.6, 0.2]])
+    c = np.array([[0.2, 0.2, 0.6]])
+    mixed = mix_proba({"a": a, "b": b, "c": c}, {"a": 1.0, "b": 1.0, "c": 1.0})
+    np.testing.assert_allclose(mixed, [[1 / 3, 1 / 3, 1 / 3]])
+
+
+def test_recommend_keep_when_walkforward_agrees_with_production():
+    decision = recommend_action(
+        production="logistic_regression",
+        winner="logistic_regression",
+        wf_production=0.98,
+        wf_winner=0.98,
+        holdout_production=1.01,
+        holdout_winner=1.01,
+    )
+    assert decision["action"] == "KEEP CURRENT PRODUCTION"
+
+
+def test_recommend_insufficient_for_la_liga_scale_xgboost_gap():
+    """SP1 production XGBoost vs LR was ~0.0002. That is fold noise, not a switch."""
+    decision = recommend_action(
+        production="logistic_regression",
+        winner="xgboost",
+        wf_production=0.9954,
+        wf_winner=0.9952,
+        holdout_production=1.0100,
+        holdout_winner=1.0098,
+    )
+    assert decision["action"] == "INSUFFICIENT IMPROVEMENT"
+    assert decision["wf_log_loss_gain"] < 0.005
+
+
+def test_recommend_insufficient_when_ensemble_gain_is_small():
+    decision = recommend_action(
+        production="logistic_regression",
+        winner="ensemble_lr_xgb_50_50",
+        wf_production=0.980,
+        wf_winner=0.972,
+        holdout_production=1.000,
+        holdout_winner=0.993,
+    )
+    assert decision["action"] == "INSUFFICIENT IMPROVEMENT"
+
+
+def test_recommend_switch_only_for_clear_simple_model_gain():
+    decision = recommend_action(
+        production="logistic_regression",
+        winner="xgboost",
+        wf_production=1.000,
+        wf_winner=0.990,
+        holdout_production=1.020,
+        holdout_winner=1.010,
+    )
+    assert decision["action"] == "SWITCH TO NEW MODEL"
+
+
+def test_recommend_insufficient_when_holdout_does_not_confirm():
+    decision = recommend_action(
+        production="logistic_regression",
+        winner="xgboost",
+        wf_production=1.000,
+        wf_winner=0.990,
+        holdout_production=1.000,
+        holdout_winner=1.004,
+    )
+    assert decision["action"] == "INSUFFICIENT IMPROVEMENT"
+

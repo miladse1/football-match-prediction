@@ -46,3 +46,5 @@ derby.log
 airflow.cfg
 airflow.db
 airflow-webserver.pid
+# Playwright CLI output (may contain credentials)
+.playwright-cli/

@@ -99,12 +99,24 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Install with Airflow
+      - name: Install the project and Airflow in one constrained resolution
+        env:
+          # Airflow publishes a constraints file per release: the exact set of
+          # versions that release is tested against.
+          AIRFLOW_CONSTRAINTS: >-
+            https://raw.githubusercontent.com/apache/airflow/constraints-2.10.4/constraints-3.11.txt
         run: |
           python -m pip install --upgrade pip
-          pip install -e "."
-          pip install "apache-airflow==2.10.4" \
-            --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.10.4/constraints-3.11.txt"
+          # Install the project AND Airflow in a single pip invocation under the
+          # constraints file. Installing them in two commands applied the
+          # constraints only to the second one: pip downgraded typing-extensions
+          # to the pinned 4.12.2 but left the already-installed pydantic /
+          # pydantic-core at their newer versions, because Airflow's loose
+          # "pydantic>=2.6.4" was already satisfied. That mismatched pair broke
+          # DAG parsing. One resolution keeps the whole set self-consistent.
+          pip install -e "." "apache-airflow==2.10.4" --constraint "$AIRFLOW_CONSTRAINTS"
+          # Fail loudly if anything is still inconsistent.
+          pip check
 
       - name: Parse the DAG
         env:
@@ -117,8 +129,11 @@ jobs:
 
           bag = DagBag(dag_folder="airflow/dags", include_examples=False)
           assert not bag.import_errors, bag.import_errors
-          dag = bag.get_dag("football_match_pipeline")
-          assert dag is not None, "football_match_pipeline not found"
+          # Read the parsed DagBag directly. DagBag.get_dag() also queries the
+          # Airflow metadata database, which this job deliberately never
+          # initialises, so it would fail with "no such table: dag".
+          dag = bag.dags.get("football_match_pipeline")
+          assert dag is not None, f"football_match_pipeline not found in {sorted(bag.dags)}"
           expected = {
               "migrate_db",
               "ingest_raw",
@@ -130,6 +145,7 @@ jobs:
               "predict_upcoming",
               "season_forecast",
           }
-          assert expected <= set(dag.task_ids), sorted(dag.task_ids)
-          print(f"DAG parsed with {len(dag.task_ids)} tasks")
+          missing = expected - set(dag.task_ids)
+          assert not missing, f"missing tasks: {sorted(missing)}"
+          print(f"DAG parsed with {len(dag.task_ids)} tasks: {sorted(dag.task_ids)}")
           PY

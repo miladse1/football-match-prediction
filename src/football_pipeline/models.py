@@ -131,9 +131,8 @@ SKLEARN_MODELS = {
 
 # The dependency-free name list in constants must stay in step with the
 # pipelines built here. test_registry asserts this too.
-assert set(SKLEARN_MODELS) == set(PRODUCTION_ALGORITHMS), (
-    "SKLEARN_MODELS and constants.PRODUCTION_ALGORITHMS have drifted apart"
-)
+if set(SKLEARN_MODELS) != set(PRODUCTION_ALGORITHMS):  # explicit check: asserts vanish under python -O
+    raise RuntimeError("SKLEARN_MODELS and constants.PRODUCTION_ALGORITHMS have drifted apart")
 
 
 def predict_proba_3way(estimator, X: np.ndarray) -> np.ndarray:

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Runs git-guard on the staged changes. Enabled by scripts/setup-dev-security.sh
+# (git config core.hooksPath .githooks).
+exec "$(git rev-parse --show-toplevel)/.githooks/guard.sh" staged

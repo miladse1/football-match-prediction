@@ -1,0 +1,7 @@
+# Reviewed exceptions to .githooks/blocked-paths (extended regex, case-insensitive).
+# Keep entries narrow. Content checks (gitleaks, private details) still run on these files.
+
+# Template with empty values only
+(^|/)\.env\.example$
+# Small, public match-result excerpts used by tests (football-data.co.uk format)
+^tests/fixtures/[^/]+\.csv$

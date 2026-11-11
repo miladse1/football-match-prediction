@@ -12,7 +12,6 @@ from football_pipeline.football_data import (
     season_code,
     season_csv_url,
 )
-from football_pipeline.ingest import ingest_seasons
 from football_pipeline.validation import ValidationError, assert_header, assert_result_if_present, row_is_empty
 
 

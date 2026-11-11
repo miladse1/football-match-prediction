@@ -48,3 +48,9 @@ airflow.db
 airflow-webserver.pid
 # Playwright CLI output (may contain credentials)
 .playwright-cli/
+
+# AI-assistant skill packs (third-party content, kept local). Project rules: AGENTS.md, CLAUDE.md
+.agents/
+.claude/skills/
+skills-lock.json
+.playwright/

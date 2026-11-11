@@ -1,0 +1,25 @@
+# gitleaks configuration: the default rule set plus rules for this project's own secrets.
+title = "football-match-prediction"
+
+[extend]
+useDefault = true
+
+# Airflow's Fernet key encrypts connection passwords in the Airflow metadata database.
+[[rules]]
+id = "fernet-key-assignment"
+description = "Fernet key in an env-style assignment"
+regex = '''(?i)\b[A-Z_]*FERNET_KEY\s*[=:]\s*['"]?([A-Za-z0-9_\-]{43}=)'''
+secretGroup = 1
+keywords = ["fernet_key"]
+
+[[rules]]
+id = "airflow-webserver-secret"
+description = "Airflow webserver secret key"
+regex = '''(?i)\bAIRFLOW[A-Z_]*SECRET_KEY\s*[=:]\s*['"]?([A-Za-z0-9_\-+/=]{24,})'''
+secretGroup = 1
+keywords = ["secret_key"]
+
+[[allowlists]]
+description = "Template placeholders in .env.example (replace-me style values)"
+regexTarget = "line"
+regexes = ['''(?i)=\s*['"]?(replace|change|changeme|your[-_]|example|dev_admin)''']

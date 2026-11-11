@@ -6,7 +6,6 @@ import argparse
 import csv
 import logging
 from datetime import date
-from pathlib import Path
 
 from football_pipeline.config import ROOT, VALID_END, TRAIN_END, TEST_END, MIN_PRIOR_N
 from football_pipeline.competitions import DEFAULT_COMPETITION

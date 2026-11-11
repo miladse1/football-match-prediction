@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "ask": [
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git remote:*)",
+      "Bash(git config core.hooksPath:*)",
+      "Bash(git rebase:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(gh repo:*)",
+      "Bash(gh api:*)",
+      "Bash(gh release:*)",
+      "Bash(gh secret:*)",
+      "Bash(gh pr merge:*)",
+      "Edit(.githooks/**)",
+      "Edit(.gitleaks.toml)",
+      "Edit(.gitleaksignore)",
+      "Edit(.gitignore)",
+      "Edit(.claude/settings.json)",
+      "Write(.githooks/**)",
+      "Write(.gitleaks.toml)",
+      "Write(.gitleaksignore)"
+    ],
+    "deny": [
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git push --force-with-lease:*)",
+      "Bash(git push --no-verify:*)",
+      "Bash(git commit --no-verify:*)",
+      "Bash(git commit -n:*)",
+      "Bash(git filter-branch:*)",
+      "Bash(git filter-repo:*)",
+      "Read(**/.env)",
+      "Read(**/.env.local)",
+      "Read(~/Projects-private-backups/**)"
+    ]
+  }
+}

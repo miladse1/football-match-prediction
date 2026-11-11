@@ -32,3 +32,21 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 160
+
+[tool.ruff.lint]
+# Bugs (pyflakes, bugbear) and security (bandit). Style is left to the existing code.
+select = ["E9", "F", "B", "S"]
+ignore = [
+  "B905",  # zip(strict=) would change behaviour where lengths may differ on purpose
+  "S608",  # reviewed 2026-11-11: SQL f-strings insert only code-defined fragments; every value is a %s parameter
+  "S310",  # reviewed 2026-11-11: downloads use configured https URLs (football-data.co.uk, fixturedownload.com)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S108"]
+"src/football_pipeline/spark_features.py" = ["S108"]  # Spark scratch dir inside the container
+"src/football_pipeline/competitions.py" = ["S105"]    # ALL_TOKEN is the literal "all", not a password

@@ -13,7 +13,6 @@ import logging
 import urllib.request
 from datetime import datetime, timezone
 
-from psycopg.types.json import Jsonb
 
 from football_pipeline.competitions import get as get_competition
 from football_pipeline.config import RAW_DATA_DIR

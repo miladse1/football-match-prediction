@@ -1,0 +1,6 @@
+---
+description: Security rules for this public repository (always on)
+alwaysApply: true
+---
+
+Follow AGENTS.md. Never open, print, or commit `.env`; keep data dumps, models, and logs out of Git; never use the holdout season for selection; report only metrics the pipeline wrote; never commit, push, or change GitHub settings without the user's explicit approval, and never use `--no-verify`.

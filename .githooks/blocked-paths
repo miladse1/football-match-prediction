@@ -1,0 +1,28 @@
+# Paths that must never be committed (extended regex, case-insensitive, matched against the
+# repository-relative path). .githooks/allowed-paths overrides this list after review.
+# Images and other project assets are not blocked; the pre-commit hook reminds you to check them.
+
+# Secrets and credentials
+(^|/)\.env(\..+)?$
+\.env$
+\.(pem|key|p12|pfx|jks|keystore|ovpn|kdbx|gpg)$
+(^|/)id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$
+(^|/)(credentials|secrets?|service-account)[^/]*\.(json|ya?ml|toml|txt)$
+(^|/)\.(netrc|npmrc|pypirc)$
+\.(cookies?|har)$
+
+# Databases, dumps, and backups
+\.(db|sqlite|sqlite3|db3)$
+\.(db|sqlite|sqlite3)-(wal|shm|journal)$
+\.(dump|bak|backup)$
+\.(zip|tar|tgz|gz|bz2|xz|7z|rar)$
+
+# Personal documents and data exports (resumes, cover letters, statements)
+\.(pdf|docx?|odt|rtf|pages|xlsx?|numbers|csv)$
+
+# Logs, runtime data, and local tool output
+\.log$
+(^|/)(\.logs|logs|backups?|storage|browser-profile|\.playwright-cli|playwright-report|test-results)/
+(^|/)\.DS_Store$
+(^|/)\.venv[^/]*/
+(^|/)node_modules/

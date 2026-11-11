@@ -21,7 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
-spark = ["pyspark==3.5.5"]
+spark = ["pyspark==4.3.0"]
 
 [build-system]
 requires = ["setuptools>=68"]

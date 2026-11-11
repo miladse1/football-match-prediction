@@ -1,10 +1,26 @@
-# Premier League Match Prediction
+# Football Match Prediction: Europe's Top 5 Leagues
 
 [![CI](https://github.com/miladse1/football-match-prediction/actions/workflows/ci.yml/badge.svg)](https://github.com/miladse1/football-match-prediction/actions/workflows/ci.yml)
 
-End-to-end data pipeline and model that estimates **Home / Draw / Away** probabilities for Premier League matches, then serves them in a local dashboard.
+End-to-end data pipeline and models that estimate **Home / Draw / Away** probabilities for the Premier League, La Liga, Bundesliga, Serie A, and Ligue 1, then serve them in a local dashboard with season forecasts.
 
-The production model is **unweighted logistic regression**. Pre-match probabilities are frozen once a result arrives.
+Built with **Apache Airflow, PySpark, PostgreSQL, scikit-learn, XGBoost, and FastAPI**. Each league gets its own walk-forward model selection and an untouched holdout season. Pre-match probabilities are frozen once a result arrives.
+
+## Results (untouched 2025/26 holdout)
+
+Production model per league, scored once on a season never used for features, tuning, or model choice. Lower log loss is better.
+
+| League | Production model | Matches | Log loss | Accuracy | Baseline: uniform log loss | Baseline: always home |
+|---|---|---:|---:|---:|---:|---:|
+| Premier League | Logistic regression | 375 | 1.029 | 50.7% | 1.099 | 42.4% |
+| La Liga | XGBoost | 375 | 0.978 | 54.1% | 1.099 | 48.5% |
+| Bundesliga | Logistic regression | 301 | 0.968 | 54.5% | 1.099 | 43.9% |
+| Serie A | Logistic regression | 375 | 1.009 | 52.0% | 1.099 | 39.2% |
+| Ligue 1 | Logistic regression | 301 | 1.018 | 48.8% | 1.099 | 45.8% |
+
+Every league beats both baselines on the holdout. Draws remain the hard class: draw recall is 0.00–0.13 (see [Draw calibration](#draw-calibration)). Figures come from the pipeline run of 6 November 2026 (`data/processed/**/final_test_metrics.json`); the Bundesliga and Ligue 1 have 18 clubs (306 matches) rather than 20 (380), and matches involving a club with fewer than five prior matches are excluded from training and scoring.
+
+**Model comparison across all five leagues.** A walk-forward experiment (`ensemble_experiment.py`) compared logistic regression, XGBoost, random forest, a Dixon–Coles Poisson model, and weighted probability ensembles. An LR + XGBoost + Poisson ensemble had the best mean walk-forward log loss in every league, but by only 0.004–0.011. The project's promotion rule requires at least a 0.010 walk-forward gain that the holdout confirms, so the simpler production models stay in four leagues; for Ligue 1 the experiment recommends switching, and that model has not been promoted yet.
 
 ## Problem
 
@@ -45,7 +61,7 @@ Python, PostgreSQL, Apache Airflow 2.10, PySpark 3.5, pandas, scikit-learn, XGBo
 
 | Source | What it supplies |
 |---|---|
-| [football-data.co.uk](https://www.football-data.co.uk/data.php) | Premier League season CSVs from 2018/19 through the current season. Results only (`FTHG`, `FTAG`, `FTR`). |
+| [football-data.co.uk](https://www.football-data.co.uk/data.php) | Season CSVs for the Premier League (`E0`), La Liga (`SP1`), Bundesliga (`D1`), Serie A (`I1`), and Ligue 1 (`F1`) from 2018/19 through the current season. Results only (`FTHG`, `FTAG`, `FTR`). |
 | [fixturedownload.com](https://fixturedownload.com) | Remaining 2026/27 kickoffs. Scores in that feed are ignored; official results stay on football-data.co.uk. |
 
 ## Database and ETL
@@ -78,7 +94,7 @@ Feature version `v2-draw-aware`. Every value is computed from **earlier** matche
 
 A unit test plants a fake future result and asserts that earlier features do not change.
 
-## Models tested
+## Models tested (Premier League)
 
 Walk-forward compared four classifiers on the same features:
 

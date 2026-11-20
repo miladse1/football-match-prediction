@@ -21,4 +21,4 @@ RUN pip install --no-cache-dir \
     "scikit-learn>=1.5" \
     "xgboost>=2.0" \
     "joblib>=1.4" \
-    "pyspark==3.5.5"
+    "pyspark==3.5.8"

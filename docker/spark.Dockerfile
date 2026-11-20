@@ -15,7 +15,7 @@ ENV SPARK_LOCAL_IP=127.0.0.1
 WORKDIR /opt/project
 
 RUN pip install --no-cache-dir \
-    "pyspark==3.5.5" \
+    "pyspark==3.5.8" \
     "psycopg[binary]>=3.2" \
     "python-dotenv>=1.0" \
     "pytest>=8.0"

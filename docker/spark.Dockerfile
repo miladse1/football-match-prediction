@@ -1,4 +1,4 @@
-FROM python:3.11-slim-bookworm
+FROM python:3.15-slim-bookworm
 
 # Spark 3.5 needs a Java 17 runtime. The host has Java 25, which Spark cannot start.
 RUN apt-get update \

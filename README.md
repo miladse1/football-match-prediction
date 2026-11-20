@@ -70,7 +70,7 @@ Python, PostgreSQL, Apache Airflow 2.10, PySpark 3.5, pandas, scikit-learn, XGBo
 
 PostgreSQL holds `raw_match_payloads`, `competitions`, `seasons`, `teams`, `matches`, `match_features`, `training_rows`, `model_runs`, and `predictions`.
 
-The DAG `football_match_pipeline` runs the same full path on a schedule **and** on demand (Airflow **Trigger**):
+The DAG `football_match_pipeline` runs the same full path on a schedule **and** on demand (Airflow **Trigger**). After one `migrate_db` task, each league (`E0`, `SP1`, `D1`, `I1`, `F1`) runs the same eight stages in its own TaskGroup. Groups run one after another so Spark and training never overlap, and every write is scoped to its competition.
 
 1. `migrate_db`
 2. `ingest_raw` — download season CSVs
@@ -99,6 +99,8 @@ Feature version `v2-draw-aware`. Every value is computed from **earlier** matche
 A unit test plants a fake future result and asserts that earlier features do not change.
 
 ## Models tested (Premier League)
+
+The sections from here to [Draw calibration](#draw-calibration) describe the original Premier League study. Every other league goes through the same walk-forward selection; its production model and holdout scores are in the [results table](#results-untouched-202526-holdout).
 
 Walk-forward compared four classifiers on the same features:
 
@@ -132,7 +134,7 @@ Season boundaries are derived from the current date by `src/football_pipeline/se
 
 The winner is retrained on all permitted history through 2024/25, then scored once on 2025/26.
 
-## Untouched holdout test (2025/26)
+## Untouched holdout test (Premier League, 2025/26)
 
 Production logistic regression, n = 375:
 
@@ -149,7 +151,7 @@ Confusion matrix (rows = true away / draw / home): `[[58, 0, 56], [37, 0, 65], [
 
 ## Draw calibration
 
-Out-of-sample only (walk-forward folds + 2025/26 test, n = 1,875):
+Premier League, out-of-sample only (walk-forward folds + 2025/26 test, n = 1,875):
 
 | Class | Mean predicted | Actual | Gap | Brier | Argmax share |
 |---|---:|---:|---:|---:|---:|
@@ -165,15 +167,18 @@ That is a known limitation of the production model, not a dashboard rounding cho
 
 Read-only FastAPI app at [http://127.0.0.1:8500](http://127.0.0.1:8500) (loopback only). It does not train models.
 
+A league switcher in the header moves every page between the five leagues.
+
 | Page | Contents |
 |---|---|
-| Overview | Live 2026/27 snapshot, next fixtures, latest completed score |
-| Upcoming | Unplayed fixtures with frozen pre-match probabilities |
+| Overview | Live 2026/27 snapshot, next fixtures, latest result, title race |
+| Fixtures | Unplayed fixtures with frozen pre-match probabilities |
 | Results | Completed 2026/27 matches vs those original probabilities |
-| Performance | Live accuracy and log loss |
-| About | Walk-forward method, test metrics, draw limitation |
+| Forecast | Monte Carlo projected table: title, Champions League, Europe and relegation odds |
+| Accuracy | Live accuracy, log loss, and per-outcome hit rates |
+| Method | Walk-forward method, holdout metrics, draw limitation |
 
-Upcoming and Results paginate (~16 matches) and filter by team or date.
+Fixtures and Results paginate (16 matches per page) and filter by team or date. Each match opens a detail page.
 
 | Season forecast | Results vs pre-match probabilities |
 |---|---|
@@ -228,12 +233,12 @@ Spark plus PostgreSQL tests, and an Airflow DAG import check.
 
 In the Airflow UI, open `football_match_pipeline` and click **Trigger**. Leave the form unchanged:
 
-- Competition `E0`
+- Competition `all` (all five leagues; set `E0`, `SP1`, `D1`, `I1`, or `F1` for a single-league run)
 - Historical start year `2018`
 - End season `auto`
-- Local CSV path blank
+- Local CSV path blank (only valid with a single competition)
 
-That ingests 2018/19 through the current August–July season, rebuilds features, retrains with the same walk-forward procedure, and scores remaining unplayed fixtures. Matches that already have a result keep their original probabilities.
+That ingests 2018/19 through the current August–July season, rebuilds features, retrains with the same walk-forward procedure, scores remaining unplayed fixtures, and reruns the season forecast for each selected league. Matches that already have a result keep their original probabilities.
 
 CLI equivalent (do not pass `--conf`):
 
@@ -255,10 +260,10 @@ Stop services: `docker compose stop`. Start the dashboard later with `docker com
 
 ## Limitations
 
-- Premier League only (football-data.co.uk code `E0`)
+- Five leagues only (football-data.co.uk codes `E0`, `SP1`, `D1`, `I1`, `F1`); no cups or European competitions
 - No expected goals, injuries, or lineups
-- Unweighted logistic regression almost never has Draw as the highest-probability class
-- Draw probabilities are slightly too low on average (~3 pp on pooled OOS)
+- The production models rarely make Draw the highest-probability class (holdout draw recall 0.00–0.13)
+- Premier League draw probabilities are slightly too low on average (~3 pp on pooled OOS)
 - Live 2026/27 accuracy is a small sample until more matches finish
 - Local-only; not a public betting product
 
@@ -266,6 +271,5 @@ Stop services: `docker compose stop`. Start the dashboard later with `docker com
 
 - Expected goals (xG) and shot quality
 - Player availability / injuries
-- Other leagues with the same leakage-safe pipeline
-- League-title and placement simulation from remaining-fixture probabilities
+- Decide whether to promote the LR + XGBoost + Poisson ensemble for Ligue 1, where the walk-forward experiment favours it
 - Recalibration or a Draw-specific head only if it improves out-of-time log loss

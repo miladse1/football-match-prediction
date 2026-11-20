@@ -6,6 +6,8 @@ End-to-end data pipeline and models that estimate **Home / Draw / Away** probabi
 
 Built with **Apache Airflow, PySpark, PostgreSQL, scikit-learn, XGBoost, and FastAPI**. Each league gets its own walk-forward model selection and an untouched holdout season. Pre-match probabilities are frozen once a result arrives.
 
+![MatchLab dashboard overview: live 2026/27 Premier League probabilities, next fixtures and title race](docs/images/dashboard-overview.png)
+
 ## Results (untouched 2025/26 holdout)
 
 Production model per league, scored once on a season never used for features, tuning, or model choice. Lower log loss is better.
@@ -81,6 +83,8 @@ The DAG `football_match_pipeline` runs the same full path on a schedule **and** 
 9. `season_forecast` — Monte Carlo title/top-4/relegation outlook from frozen probabilities
 
 Schedule: `0 6 * * 1,4` (Monday and Thursday 06:00 **America/New_York**). Catchup is off. At most one run at a time.
+
+![Airflow grid view of football_match_pipeline: migrate_db followed by one TaskGroup per league](docs/images/airflow-dag-grid.png)
 
 ## Feature engineering
 
@@ -170,6 +174,12 @@ Read-only FastAPI app at [http://127.0.0.1:8500](http://127.0.0.1:8500) (loopbac
 | About | Walk-forward method, test metrics, draw limitation |
 
 Upcoming and Results paginate (~16 matches) and filter by team or date.
+
+| Season forecast | Results vs pre-match probabilities |
+|---|---|
+| ![Season forecast page: Monte Carlo title, Champions League and relegation odds](docs/images/dashboard-forecast.png) | ![Results page: completed matches with the probabilities stored before kickoff](docs/images/dashboard-results.png) |
+
+![Accuracy page: live hit rate, log loss and per-outcome recall](docs/images/dashboard-accuracy.png)
 
 ## Run locally
 
